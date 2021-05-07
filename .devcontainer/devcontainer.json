@@ -40,7 +40,7 @@
 	// "forwardPorts": [9000],
 
 	// Use 'postCreateCommand' to run commands after the container is created.
-	"postCreateCommand": "python setup.py install",
+	"postCreateCommand": "pip install -e .",
 
 	// Use 'portsAttributes' to set default properties for specific forwarded ports.
 	"portsAttributes": {
