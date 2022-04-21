@@ -6,7 +6,7 @@ v3.0.0dev) and versioning. Every change or migration gets a new flow file
 version number, this prevents issues with developer builds and snapshots.
 """
 import uuid
-from typing import Any, Dict, Mapping, Union  # noqa
+from typing import Any, Dict, Mapping, Union
 
 from mitmproxy import version
 from mitmproxy.utils import strutils
@@ -300,6 +300,42 @@ def convert_11_12(data):
     return data
 
 
+def convert_12_13(data):
+    data["version"] = 13
+    if data["marked"]:
+        data["marked"] = ":default:"
+    else:
+        data["marked"] = ""
+    return data
+
+
+def convert_13_14(data):
+    data["version"] = 14
+    data["comment"] = ""
+    # bugfix for https://github.com/mitmproxy/mitmproxy/issues/4576
+    if data.get("response", None) and data["response"]["timestamp_start"] is None:
+        data["response"]["timestamp_start"] = data["request"]["timestamp_end"]
+        data["response"]["timestamp_end"] = data["request"]["timestamp_end"] + 1
+    return data
+
+
+def convert_14_15(data):
+    data["version"] = 15
+    if data.get("websocket", None):
+        # Add "injected" attribute.
+        data["websocket"]["messages"] = [
+            msg + [False]
+            for msg in data["websocket"]["messages"]
+        ]
+    return data
+
+
+def convert_15_16(data):
+    data["version"] = 16
+    data["timestamp_created"] = data.get("request", data["client_conn"])["timestamp_start"]
+    return data
+
+
 def _convert_dict_keys(o: Any) -> Any:
     if isinstance(o, dict):
         return {strutils.always_str(k): _convert_dict_keys(v) for k, v in o.items()}
@@ -359,6 +395,10 @@ converters = {
     9: convert_9_10,
     10: convert_10_11,
     11: convert_11_12,
+    12: convert_12_13,
+    13: convert_13_14,
+    14: convert_14_15,
+    15: convert_15_16,
 }
 
 

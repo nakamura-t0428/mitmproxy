@@ -142,6 +142,7 @@ class OptionListWalker(urwid.ListWalker):
         self.index = index
         self.focus_obj = self._get(self.index, self.editing)
         option_focus_change.send(opt.help)
+        self._modified()
 
     def get_next(self, pos):
         if pos >= len(self.opts) - 1:
@@ -154,6 +155,12 @@ class OptionListWalker(urwid.ListWalker):
         if pos < 0:
             return None, None
         return self._get(pos, False), pos
+
+    def positions(self, reverse=False):
+        if reverse:
+            return reversed(range(len(self.opts)))
+        else:
+            return range(len(self.opts))
 
 
 class OptionsList(urwid.ListBox):
@@ -174,8 +181,7 @@ class OptionsList(urwid.ListBox):
                 foc, idx = self.get_focus()
                 v = self.walker.get_edit_text()
                 try:
-                    d = self.master.options.parse_setval(foc.opt, v)
-                    self.master.options.update(**{foc.opt.name: d})
+                    self.master.options.set(f"{foc.opt.name}={v}")
                 except exceptions.OptionsError as v:
                     signals.status_message.send(message=str(v))
                 self.walker.stop_editing()

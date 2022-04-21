@@ -22,7 +22,7 @@ def always_bytes(str_or_bytes: Union[None, str, bytes], *encode_args) -> Union[N
     elif isinstance(str_or_bytes, str):
         return str_or_bytes.encode(*encode_args)
     else:
-        raise TypeError("Expected str or bytes, but got {}.".format(type(str_or_bytes).__name__))
+        raise TypeError(f"Expected str or bytes, but got {type(str_or_bytes).__name__}.")
 
 
 @overload
@@ -45,7 +45,7 @@ def always_str(str_or_bytes: Union[None, str, bytes], *decode_args) -> Union[Non
     elif isinstance(str_or_bytes, bytes):
         return str_or_bytes.decode(*decode_args)
     else:
-        raise TypeError("Expected str or bytes, but got {}.".format(type(str_or_bytes).__name__))
+        raise TypeError(f"Expected str or bytes, but got {type(str_or_bytes).__name__}.")
 
 
 # Translate control characters to "safe" characters. This implementation
@@ -73,13 +73,13 @@ def escape_control_characters(text: str, keep_spacing=True) -> str:
         keep_spacing: If True, tabs and newlines will not be replaced.
     """
     if not isinstance(text, str):
-        raise ValueError("text type must be unicode but is {}".format(type(text).__name__))
+        raise ValueError(f"text type must be unicode but is {type(text).__name__}")
 
     trans = _control_char_trans_newline if keep_spacing else _control_char_trans
     return text.translate(trans)
 
 
-def bytes_to_escaped_str(data, keep_spacing=False, escape_single_quotes=False):
+def bytes_to_escaped_str(data: bytes, keep_spacing: bool = False, escape_single_quotes: bool = False) -> str:
     """
     Take bytes and return a safe string that can be displayed to the user.
 
@@ -107,7 +107,7 @@ def bytes_to_escaped_str(data, keep_spacing=False, escape_single_quotes=False):
     return ret
 
 
-def escaped_str_to_bytes(data):
+def escaped_str_to_bytes(data: str) -> bytes:
     """
     Take an escaped string and return the unescaped bytes equivalent.
 
@@ -119,7 +119,7 @@ def escaped_str_to_bytes(data):
 
     # This one is difficult - we use an undocumented Python API here
     # as per http://stackoverflow.com/a/23151714/934719
-    return codecs.escape_decode(data)[0]
+    return codecs.escape_decode(data)[0]  # type: ignore
 
 
 def is_mostly_bin(s: bytes) -> bool:

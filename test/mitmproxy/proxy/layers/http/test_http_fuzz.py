@@ -19,9 +19,21 @@ from test.mitmproxy.proxy.layers.http.hyper_h2_test_helpers import FrameFactory
 from test.mitmproxy.proxy.layers.http.test_http2 import make_h2, example_response_headers, example_request_headers, \
     start_h2_client
 from test.mitmproxy.proxy.tutils import Placeholder, Playbook, reply, _TracebackInPlaybook, _eq
+from mitmproxy.proxy.layers.http import _http2
 
 opts = options.Options()
 Proxyserver().load(opts)
+
+
+@pytest.fixture(scope="module", autouse=True)
+def disable_h2_error_catching():
+    errs = _http2.CATCH_HYPER_H2_ERRORS
+    _http2.CATCH_HYPER_H2_ERRORS = ()
+    try:
+        yield None
+    finally:
+        _http2.CATCH_HYPER_H2_ERRORS = errs
+
 
 request_lines = sampled_from([
     b"GET / HTTP/1.1",
@@ -236,6 +248,7 @@ def _h2_request(chunks):
 @example([
     b'\x00\x00%\x01\x04\x00\x00\x00\x01A\x8b/\x91\xd3]\x05\\\x87\xa6\xe3M3\x84\x86\x82`\x85\x94\xe7\x8c~\xfff\x88/\x91'
     b'\xd3]\x05\\\x87\xa7\\\x82h_\x00\x00\x07\x01\x05\x00\x00\x00\x01\xc1\x84\x86\x82\xc0\xbf\xbe'])
+@example([b'\x00\x00\x03\x01\x04\x00\x00\x00\x01\x84\x86\x82\x00\x00\x08\x07\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'])
 def test_fuzz_h2_request_chunks(chunks):
     _h2_request(chunks)
 
@@ -268,6 +281,7 @@ def _h2_response(chunks):
 @example([b'\x00\x00\x00\x01\x04\x00\x00\x00\x01'])
 @example([b'\x00\x00\x07\x05\x04\x00\x00\x00\x01\x00\x00\x00\x02\x84\x86\x82'])
 @example([b'\x00\x00\x06\x014\x00\x01\x00\x00\x00\x00\x01@\x80\x81c\x86\x82'])
+@example([b'\x00\x00\x06\x01\x04\x00\x00\x00\x01@\x80\x81c\x86\x82'])
 def test_fuzz_h2_response_chunks(chunks):
     _h2_response(chunks)
 

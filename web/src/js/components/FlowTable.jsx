@@ -1,4 +1,4 @@
-import React from 'react'
+import * as React from "react"
 import PropTypes from 'prop-types'
 import ReactDOM from 'react-dom'
 import { connect } from 'react-redux'
@@ -8,13 +8,11 @@ import { calcVScroll } from './helpers/VirtualScroll'
 import FlowTableHead from './FlowTable/FlowTableHead'
 import FlowRow from './FlowTable/FlowRow'
 import Filt from "../filt/filt"
-import * as flowsActions from '../ducks/flows'
 
 
 class FlowTable extends React.Component {
 
     static propTypes = {
-        selectFlow: PropTypes.func.isRequired,
         flows: PropTypes.array.isRequired,
         rowHeight: PropTypes.number,
         highlight: PropTypes.string,
@@ -32,11 +30,11 @@ class FlowTable extends React.Component {
         this.onViewportUpdate = this.onViewportUpdate.bind(this)
     }
 
-    componentWillMount() {
+    UNSAFE_componentWillMount() {
         window.addEventListener('resize', this.onViewportUpdate)
     }
 
-    componentWillUnmount() {
+    UNSAFE_componentWillUnmount() {
         window.removeEventListener('resize', this.onViewportUpdate)
     }
 
@@ -69,7 +67,7 @@ class FlowTable extends React.Component {
         }
     }
 
-    componentWillReceiveProps(nextProps) {
+    UNSAFE_componentWillReceiveProps(nextProps) {
         if (nextProps.selected && nextProps.selected !== this.props.selected) {
             this.shouldScrollIntoView = true
         }
@@ -77,11 +75,11 @@ class FlowTable extends React.Component {
 
     onViewportUpdate() {
         const viewport = ReactDOM.findDOMNode(this)
-        const viewportTop = viewport.scrollTop
+        const viewportTop = viewport.scrollTop || 0
 
         const vScroll = calcVScroll({
             viewportTop,
-            viewportHeight: viewport.offsetHeight,
+            viewportHeight: viewport.offsetHeight || 0,
             itemCount: this.props.flows.length,
             rowHeight: this.props.rowHeight,
         })
@@ -103,17 +101,16 @@ class FlowTable extends React.Component {
                         <FlowTableHead />
                     </thead>
                     <tbody>
-                        <tr style={{ height: vScroll.paddingTop }}></tr>
+                        <tr style={{ height: vScroll.paddingTop }}/>
                         {flows.slice(vScroll.start, vScroll.end).map(flow => (
                             <FlowRow
                                 key={flow.id}
                                 flow={flow}
                                 selected={flow === selected}
                                 highlighted={isHighlighted(flow)}
-                                onSelect={this.props.selectFlow}
                             />
                         ))}
-                        <tr style={{ height: vScroll.paddingBottom }}></tr>
+                        <tr style={{ height: vScroll.paddingBottom }}/>
                     </tbody>
                 </table>
             </div>
@@ -128,8 +125,5 @@ export default connect(
         flows: state.flows.view,
         highlight: state.flows.highlight,
         selected: state.flows.byId[state.flows.selected[0]],
-    }),
-    {
-        selectFlow: flowsActions.select,
-    }
+    })
 )(PureFlowTable)

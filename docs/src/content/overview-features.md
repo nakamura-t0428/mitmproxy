@@ -19,7 +19,6 @@ menu:
 - [Sticky Auth](#sticky-auth)
 - [Sticky Cookies](#sticky-cookies)
 - [Streaming](#streaming)
-- [Upstream Certificates](#upstream-certificates)
 
 ## Anticache
 
@@ -88,14 +87,17 @@ and transparently returned to the client.
 * **flow-filter** is an optional mitmproxy [filter expression]({{< relref "concepts-filters">}})
 that additionally constrains which requests will be redirected.
 
+The _separator_ is arbitrary, and is defined by the first character (`|` in the example above).
+
+
 #### Examples
 
 Pattern | Description
 ------- | -----------
-`|example.com/main.js|~/main-local.js` | Replace `example.com/main.js` with `~/main-local.js`.
-`|example.com/static|~/static` | Replace `example.com/static/foo/bar.css` with `~/static/foo/bar.css`.
-`|example.com/static/foo|~/static` | Replace `example.com/static/foo/bar.css` with `~/static/bar.css`.
-`|~m GET|example.com/static|~/static` | Replace `example.com/static/foo/bar.css` with `~/static/foo/bar.css` (but only for GET requests).
+`\|example.com/main.js\|~/main-local.js` | Replace `example.com/main.js` with `~/main-local.js`.
+`\|example.com/static\|~/static` | Replace `example.com/static/foo/bar.css` with `~/static/foo/bar.css`.
+`\|example.com/static/foo\|~/static` | Replace `example.com/static/foo/bar.css` with `~/static/bar.css`.
+`\|~m GET\|example.com/static\|~/static` | Replace `example.com/static/foo/bar.css` with `~/static/foo/bar.css` (but only for GET requests).
 
 ### Details
 
@@ -145,9 +147,6 @@ The `map_remote` option lets you specify an arbitrary number of patterns that
 define replacements within HTTP request URLs before they are sent to a server.
 The substituted URL is fetched instead of the original resource
 and the corresponding HTTP response is returned transparently to the client.
-Note that if the original destination uses HTTP2, the substituted destination
-needs to support HTTP2 as well, otherwise the substituted request may fail.
-As a workaround you can start mitmproxy with the `--no-http2` flag to disable HTTP2.
 `map_remote` patterns look like this:
 
 ```
@@ -162,13 +161,11 @@ that defines which requests the `map_remote` option applies to.
 
 * **replacement** is a string literal that is substituted in.
 
-The _separator_ is arbitrary, and is defined by the first character.
+The _separator_ is arbitrary, and is defined by the first character (`|` in the example above).
 
 #### Examples
 
 Map all requests ending with `.jpg` to `https://placedog.net/640/480?random`.
-Note that this might fail if the original HTTP request destination uses HTTP2 but the replaced
-destination does not support HTTP2.
 
 ```
 |.*\.jpg$|https://placedog.net/640/480?random
@@ -200,7 +197,7 @@ that defines which flows a replacement applies to.
 * **replacement** is a string literal that is substituted in. If the replacement string
 literal starts with `@` as in `@file-path`, it is treated as a **file path** from which the replacement is read.
 
-The _separator_ is arbitrary, and is defined by the first character.
+The _separator_ is arbitrary, and is defined by the first character (`/` in the example above).
 
 Modify hooks fire when either a client request or a server response is
 received. Only the matching flow component is affected: so, for example,
@@ -246,7 +243,7 @@ that defines which flows to modify headers on.
 headers with **name**. If the value string literal starts with `@` as in
 `@file-path`, it is treated as a **file path** from which the replacement is read.
 
-The _separator_ is arbitrary, and is defined by the first character.
+The _separator_ is arbitrary, and is defined by the first character (`/` in the example above).
 
 Existing headers are overwritten by default. This can be changed using a filter expression.
 
@@ -278,7 +275,7 @@ Set the `User-Agent` header to the data read from `~/useragent.txt` for all requ
 (existing `User-Agent` headers are replaced):
 
 ```
-/~q/Host/@~/useragent.txt
+/~q/User-Agent/@~/useragent.txt
 ```
 
 Remove existing `Host` headers from all requests:
@@ -361,7 +358,8 @@ By default, mitmproxy will read an entire request/response, perform any
 indicated manipulations on it, and then send the message on to the other party.
 This can be problematic when downloading or uploading large files. When
 streaming is enabled, message bodies are not buffered on the proxy but instead
-sent directly to the server/client. HTTP headers are still fully buffered before
+sent directly to the server/client. This currently means that the message body
+will not be accessible within mitmproxy. HTTP headers are still fully buffered before
 being sent.
 
 Request/response streaming is enabled by specifying a size cutoff in the

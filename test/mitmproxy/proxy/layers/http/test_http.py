@@ -1,14 +1,14 @@
 import pytest
 
+from mitmproxy.connection import ConnectionState, Server
 from mitmproxy.flow import Error
 from mitmproxy.http import HTTPFlow, Response
 from mitmproxy.net.server_spec import ServerSpec
-from mitmproxy.proxy.layers.http import HTTPMode
 from mitmproxy.proxy import layer
-from mitmproxy.proxy.commands import CloseConnection, OpenConnection, SendData, Log
-from mitmproxy.connection import ConnectionState, Server
+from mitmproxy.proxy.commands import CloseConnection, Log, OpenConnection, SendData
 from mitmproxy.proxy.events import ConnectionClosed, DataReceived
 from mitmproxy.proxy.layers import TCPLayer, http, tls
+from mitmproxy.proxy.layers.http import HTTPMode
 from mitmproxy.proxy.layers.tcp import TcpMessageInjected, TcpStartHook
 from mitmproxy.proxy.layers.websocket import WebsocketStartHook
 from mitmproxy.tcp import TCPFlow, TCPMessage
@@ -263,39 +263,127 @@ def test_disconnect_while_intercept(tctx):
     )
     assert server1() != server2()
     assert flow().server_conn == server2()
+    assert not flow().live
 
 
-def test_response_streaming(tctx):
+@pytest.mark.parametrize("why", ["body_size=0", "body_size=3", "addon"])
+@pytest.mark.parametrize("transfer_encoding", ["identity", "chunked"])
+def test_response_streaming(tctx, why, transfer_encoding):
     """Test HTTP response streaming"""
+    server = Placeholder(Server)
+    flow = Placeholder(HTTPFlow)
+    playbook = Playbook(http.HttpLayer(tctx, HTTPMode.regular))
+
+    if why.startswith("body_size"):
+        tctx.options.stream_large_bodies = why.replace("body_size=", "")
+
+    def enable_streaming(flow: HTTPFlow):
+        if why == "addon":
+            flow.response.stream = True
+
+    assert (
+        playbook
+        >> DataReceived(tctx.client, b"GET http://example.com/largefile HTTP/1.1\r\nHost: example.com\r\n\r\n")
+        << http.HttpRequestHeadersHook(flow)
+        >> reply()
+        << http.HttpRequestHook(flow)
+        >> reply()
+        << OpenConnection(server)
+        >> reply(None)
+        << SendData(server, b"GET /largefile HTTP/1.1\r\nHost: example.com\r\n\r\n")
+        >> DataReceived(server, b"HTTP/1.1 200 OK\r\n")
+    )
+    assert flow().live
+    if transfer_encoding == "identity":
+        playbook >> DataReceived(server, b"Content-Length: 6\r\n\r\n"
+                                         b"abc")
+    else:
+        playbook >> DataReceived(server, b"Transfer-Encoding: chunked\r\n\r\n"
+                                         b"3\r\nabc\r\n")
+
+    playbook << http.HttpResponseHeadersHook(flow)
+    playbook >> reply(side_effect=enable_streaming)
+
+    if transfer_encoding == "identity":
+        playbook << SendData(tctx.client, b"HTTP/1.1 200 OK\r\n"
+                                          b"Content-Length: 6\r\n\r\n"
+                                          b"abc")
+        playbook >> DataReceived(server, b"def")
+        playbook << SendData(tctx.client, b"def")
+    else:
+        if why == "body_size=3":
+            playbook >> DataReceived(server, b"3\r\ndef\r\n")
+            playbook << SendData(tctx.client, b"HTTP/1.1 200 OK\r\n"
+                                              b"Transfer-Encoding: chunked\r\n\r\n"
+                                              b"6\r\nabcdef\r\n")
+        else:
+            playbook << SendData(tctx.client, b"HTTP/1.1 200 OK\r\n"
+                                              b"Transfer-Encoding: chunked\r\n\r\n"
+                                              b"3\r\nabc\r\n")
+            playbook >> DataReceived(server, b"3\r\ndef\r\n")
+            playbook << SendData(tctx.client, b"3\r\ndef\r\n")
+        playbook >> DataReceived(server, b"0\r\n\r\n")
+
+    playbook << http.HttpResponseHook(flow)
+    playbook >> reply()
+
+    if transfer_encoding == "chunked":
+        playbook << SendData(tctx.client, b"0\r\n\r\n")
+
+    assert playbook
+    assert not flow().live
+
+
+def test_stream_modify(tctx):
+    """Test HTTP stream modification"""
     server = Placeholder(Server)
     flow = Placeholder(HTTPFlow)
 
     def enable_streaming(flow: HTTPFlow):
-        flow.response.stream = lambda x: x.upper()
+        if flow.response is None:
+            flow.request.stream = lambda x: b"[" + x + b"]"
+        else:
+            flow.response.stream = lambda x: b"[" + x + b"]"
 
     assert (
-            Playbook(http.HttpLayer(tctx, HTTPMode.regular))
-            >> DataReceived(tctx.client, b"GET http://example.com/largefile HTTP/1.1\r\nHost: example.com\r\n\r\n")
-            << http.HttpRequestHeadersHook(flow)
-            >> reply()
-            << http.HttpRequestHook(flow)
-            >> reply()
-            << OpenConnection(server)
-            >> reply(None)
-            << SendData(server, b"GET /largefile HTTP/1.1\r\nHost: example.com\r\n\r\n")
-            >> DataReceived(server, b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nabc")
-            << http.HttpResponseHeadersHook(flow)
-            >> reply(side_effect=enable_streaming)
-            << SendData(tctx.client, b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nABC")
-            >> DataReceived(server, b"def")
-            << SendData(tctx.client, b"DEF")
-            << http.HttpResponseHook(flow)
-            >> reply()
+        Playbook(http.HttpLayer(tctx, HTTPMode.regular))
+        >> DataReceived(tctx.client, b"POST http://example.com/ HTTP/1.1\r\n"
+                                     b"Host: example.com\r\n"
+                                     b"Transfer-Encoding: chunked\r\n\r\n"
+                                     b"3\r\nabc\r\n"
+                                     b"0\r\n\r\n")
+        << http.HttpRequestHeadersHook(flow)
+        >> reply(side_effect=enable_streaming)
+        << OpenConnection(server)
+        >> reply(None)
+        << SendData(server, b"POST / HTTP/1.1\r\n"
+                            b"Host: example.com\r\n"
+                            b"Transfer-Encoding: chunked\r\n\r\n"
+                            b"5\r\n[abc]\r\n"
+                            b"2\r\n[]\r\n")
+        << http.HttpRequestHook(flow)
+        >> reply()
+        << SendData(server, b"0\r\n\r\n")
+        >> DataReceived(server, b"HTTP/1.1 200 OK\r\n"
+                                b"Transfer-Encoding: chunked\r\n\r\n"
+                                b"3\r\ndef\r\n"
+                                b"0\r\n\r\n")
+        << http.HttpResponseHeadersHook(flow)
+        >> reply(side_effect=enable_streaming)
+        << SendData(tctx.client, b"HTTP/1.1 200 OK\r\n"
+                                 b"Transfer-Encoding: chunked\r\n\r\n"
+                                 b"5\r\n[def]\r\n"
+                                 b"2\r\n[]\r\n")
+        << http.HttpResponseHook(flow)
+        >> reply()
+        << SendData(tctx.client, b"0\r\n\r\n")
     )
 
 
+@pytest.mark.parametrize("why", ["body_size=0", "body_size=3", "addon"])
+@pytest.mark.parametrize("transfer_encoding", ["identity", "chunked"])
 @pytest.mark.parametrize("response", ["normal response", "early response", "early close", "early kill"])
-def test_request_streaming(tctx, response):
+def test_request_streaming(tctx, why, transfer_encoding, response):
     """
     Test HTTP request streaming
 
@@ -305,55 +393,94 @@ def test_request_streaming(tctx, response):
     flow = Placeholder(HTTPFlow)
     playbook = Playbook(http.HttpLayer(tctx, HTTPMode.regular))
 
-    def enable_streaming(flow: HTTPFlow):
-        flow.request.stream = lambda x: x.upper()
+    if why.startswith("body_size"):
+        tctx.options.stream_large_bodies = why.replace("body_size=", "")
 
-    assert (
-            playbook
-            >> DataReceived(tctx.client, b"POST http://example.com/ HTTP/1.1\r\n"
-                                         b"Host: example.com\r\n"
-                                         b"Content-Length: 6\r\n\r\n"
-                                         b"abc")
-            << http.HttpRequestHeadersHook(flow)
-            >> reply(side_effect=enable_streaming)
-            << OpenConnection(server)
-            >> reply(None)
-            << SendData(server, b"POST / HTTP/1.1\r\n"
-                                b"Host: example.com\r\n"
-                                b"Content-Length: 6\r\n\r\n"
-                                b"ABC")
-    )
+    def enable_streaming(flow: HTTPFlow):
+        if why == "addon":
+            flow.request.stream = True
+
+    playbook >> DataReceived(tctx.client, b"POST http://example.com/ HTTP/1.1\r\n"
+                                          b"Host: example.com\r\n")
+    if transfer_encoding == "identity":
+        playbook >> DataReceived(tctx.client, b"Content-Length: 9\r\n\r\n"
+                                              b"abc")
+    else:
+        playbook >> DataReceived(tctx.client, b"Transfer-Encoding: chunked\r\n\r\n"
+                                              b"3\r\nabc\r\n")
+
+    playbook << http.HttpRequestHeadersHook(flow)
+    playbook >> reply(side_effect=enable_streaming)
+
+    needs_more_data_before_open = (why == "body_size=3" and transfer_encoding == "chunked")
+    if needs_more_data_before_open:
+        playbook >> DataReceived(tctx.client, b"3\r\ndef\r\n")
+
+    playbook << OpenConnection(server)
+    playbook >> reply(None)
+    playbook << SendData(server, b"POST / HTTP/1.1\r\n"
+                                 b"Host: example.com\r\n")
+
+    if transfer_encoding == "identity":
+        playbook << SendData(server, b"Content-Length: 9\r\n\r\n"
+                                     b"abc")
+        playbook >> DataReceived(tctx.client, b"def")
+        playbook << SendData(server, b"def")
+    else:
+        if needs_more_data_before_open:
+            playbook << SendData(server, b"Transfer-Encoding: chunked\r\n\r\n"
+                                         b"6\r\nabcdef\r\n")
+        else:
+            playbook << SendData(server, b"Transfer-Encoding: chunked\r\n\r\n"
+                                         b"3\r\nabc\r\n")
+            playbook >> DataReceived(tctx.client, b"3\r\ndef\r\n")
+            playbook << SendData(server, b"3\r\ndef\r\n")
+
     if response == "normal response":
+        if transfer_encoding == "identity":
+            playbook >> DataReceived(tctx.client, b"ghi")
+            playbook << SendData(server, b"ghi")
+        else:
+            playbook >> DataReceived(tctx.client, b"3\r\nghi\r\n0\r\n\r\n")
+            playbook << SendData(server, b"3\r\nghi\r\n")
+
+        playbook << http.HttpRequestHook(flow)
+        playbook >> reply()
+        if transfer_encoding == "chunked":
+            playbook << SendData(server, b"0\r\n\r\n")
         assert (
-                playbook
-                >> DataReceived(tctx.client, b"def")
-                << SendData(server, b"DEF")
-                << http.HttpRequestHook(flow)
-                >> reply()
-                >> DataReceived(server, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
-                << http.HttpResponseHeadersHook(flow)
-                >> reply()
-                << http.HttpResponseHook(flow)
-                >> reply()
-                << SendData(tctx.client, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+            playbook
+            >> DataReceived(server, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+            << http.HttpResponseHeadersHook(flow)
+            >> reply()
+            << http.HttpResponseHook(flow)
+            >> reply()
+            << SendData(tctx.client, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
         )
     elif response == "early response":
         # We may receive a response before we have finished sending our request.
         # We continue sending unless the server closes the connection.
         # https://tools.ietf.org/html/rfc7231#section-6.5.11
         assert (
-                playbook
-                >> DataReceived(server, b"HTTP/1.1 413 Request Entity Too Large\r\nContent-Length: 0\r\n\r\n")
-                << http.HttpResponseHeadersHook(flow)
-                >> reply()
-                << http.HttpResponseHook(flow)
-                >> reply()
-                << SendData(tctx.client, b"HTTP/1.1 413 Request Entity Too Large\r\nContent-Length: 0\r\n\r\n")
-                >> DataReceived(tctx.client, b"def")
-                << SendData(server, b"DEF")
-                << http.HttpRequestHook(flow)
-                >> reply()
+            playbook
+            >> DataReceived(server, b"HTTP/1.1 413 Request Entity Too Large\r\nContent-Length: 0\r\n\r\n")
+            << http.HttpResponseHeadersHook(flow)
+            >> reply()
+            << http.HttpResponseHook(flow)
+            >> reply()
+            << SendData(tctx.client, b"HTTP/1.1 413 Request Entity Too Large\r\nContent-Length: 0\r\n\r\n")
         )
+        if transfer_encoding == "identity":
+            playbook >> DataReceived(tctx.client, b"ghi")
+            playbook << SendData(server, b"ghi")
+        else:
+            playbook >> DataReceived(tctx.client, b"3\r\nghi\r\n0\r\n\r\n")
+            playbook << SendData(server, b"3\r\nghi\r\n")
+        playbook << http.HttpRequestHook(flow)
+        playbook >> reply()
+        if transfer_encoding == "chunked":
+            playbook << SendData(server, b"0\r\n\r\n")
+        assert playbook
     elif response == "early close":
         assert (
                 playbook
@@ -381,6 +508,62 @@ def test_request_streaming(tctx, response):
         assert b"502 Bad Gateway" in err()
     else:  # pragma: no cover
         assert False
+
+
+@pytest.mark.parametrize("where", ["request", "response"])
+@pytest.mark.parametrize("transfer_encoding", ["identity", "chunked"])
+def test_body_size_limit(tctx, where, transfer_encoding):
+    """Test HTTP request body_size_limit"""
+    tctx.options.body_size_limit = "3"
+    err = Placeholder(bytes)
+    flow = Placeholder(HTTPFlow)
+
+    if transfer_encoding == "identity":
+        body = b"Content-Length: 6\r\n\r\nabcdef"
+    else:
+        body = b"Transfer-Encoding: chunked\r\n\r\n6\r\nabcdef"
+
+    if where == "request":
+        assert (
+            Playbook(http.HttpLayer(tctx, HTTPMode.regular))
+            >> DataReceived(tctx.client, b"POST http://example.com/ HTTP/1.1\r\n"
+                                         b"Host: example.com\r\n" + body)
+            << http.HttpRequestHeadersHook(flow)
+            >> reply()
+            << http.HttpErrorHook(flow)
+            >> reply()
+            << SendData(tctx.client, err)
+            << CloseConnection(tctx.client)
+        )
+        assert b"413 Payload Too Large" in err()
+        assert b"body_size_limit" in err()
+        assert not flow().live
+    else:
+        server = Placeholder(Server)
+        assert (
+            Playbook(http.HttpLayer(tctx, HTTPMode.regular))
+            >> DataReceived(tctx.client, b"GET http://example.com/ HTTP/1.1\r\n"
+                                         b"Host: example.com\r\n\r\n")
+            << http.HttpRequestHeadersHook(flow)
+            >> reply()
+            << http.HttpRequestHook(flow)
+            >> reply()
+            << OpenConnection(server)
+            >> reply(None)
+            << SendData(server, b"GET / HTTP/1.1\r\n"
+                                b"Host: example.com\r\n\r\n")
+            >> DataReceived(server, b"HTTP/1.1 200 OK\r\n" + body)
+            << http.HttpResponseHeadersHook(flow)
+            >> reply()
+            << http.HttpErrorHook(flow)
+            >> reply()
+            << SendData(tctx.client, err)
+            << CloseConnection(tctx.client)
+            << CloseConnection(server)
+        )
+        assert b"502 Bad Gateway" in err()
+        assert b"body_size_limit" in err()
+        assert not flow().live
 
 
 @pytest.mark.parametrize("connect", [True, False])
@@ -411,6 +594,7 @@ def test_server_unreachable(tctx, connect):
     assert playbook
     if not connect:
         assert flow().error
+        assert not flow().live
     assert b"502 Bad Gateway" in err()
     assert b"Connection failed" in err()
 
@@ -446,6 +630,7 @@ def test_server_aborts(tctx, data):
     )
     assert flow().error
     assert b"502 Bad Gateway" in err()
+    assert not flow().live
 
 
 @pytest.mark.parametrize("redirect", ["", "change-destination", "change-proxy"])
@@ -528,10 +713,15 @@ def test_upstream_proxy(tctx, redirect, scheme):
 
     assert playbook
 
-    if redirect == "change-proxy":
-        assert server2().address == ("other-proxy", 1234)
+    if redirect == "change-destination":
+        assert flow().server_conn.address[0] == "other-server"
     else:
-        assert server2().address == ("proxy", 8080)
+        assert flow().server_conn.address[0] == "example.com"
+
+    if redirect == "change-proxy":
+        assert server2().address == flow().server_conn.via.address == ("other-proxy", 1234)
+    else:
+        assert server2().address == flow().server_conn.via.address == ("proxy", 8080)
 
     assert (
             playbook
@@ -661,14 +851,15 @@ def test_http_proxy_relative_request(tctx):
 
 def test_http_proxy_relative_request_no_host_header(tctx):
     """Test handling of a relative-form "GET /" in regular proxy mode, but without a host header."""
+    err = Placeholder(bytes)
     assert (
             Playbook(http.HttpLayer(tctx, HTTPMode.regular), hooks=False)
             >> DataReceived(tctx.client, b"GET / HTTP/1.1\r\n\r\n")
-            << SendData(tctx.client, b"HTTP/1.1 400 Bad Request\r\n"
-                                     b"content-length: 53\r\n"
-                                     b"\r\n"
-                                     b"HTTP request has no host header, destination unknown.")
+            << SendData(tctx.client, err)
+            << CloseConnection(tctx.client)
     )
+    assert b"400 Bad Request" in err()
+    assert b"HTTP request has no host header, destination unknown." in err()
 
 
 def test_http_expect(tctx):
@@ -742,6 +933,7 @@ def test_http_client_aborts(tctx, stream):
     )
 
     assert "peer closed connection" in flow().error.msg
+    assert not flow().live
 
 
 @pytest.mark.parametrize("stream", [True, False])
@@ -807,6 +999,7 @@ def test_http_server_aborts(tctx, stream):
         assert b"peer closed connection" in error_html()
 
     assert "peer closed connection" in flow().error.msg
+    assert not flow().live
 
 
 @pytest.mark.parametrize("when", ["http_connect", "requestheaders", "request", "script-response-responseheaders",
@@ -830,6 +1023,8 @@ def test_kill_flow(tctx, when):
             playbook >> reply()
         playbook << CloseConnection(tctx.client)
         assert playbook
+        if flow():
+            assert not flow().live
 
     playbook = Playbook(http.HttpLayer(tctx, HTTPMode.regular))
     assert (playbook
@@ -1017,3 +1212,177 @@ def test_reuse_error(tctx):
     )
     assert b"502 Bad Gateway" in error_html()
     assert b"tls verify failed" in error_html()
+
+
+def test_transparent_sni(tctx):
+    """Test that we keep the SNI in lazy transparent mode."""
+    tctx.client.sni = "example.com"
+    tctx.server.address = ("192.0.2.42", 443)
+    tctx.server.tls = True
+
+    flow = Placeholder(HTTPFlow)
+
+    server = Placeholder(Server)
+    assert (
+            Playbook(http.HttpLayer(tctx, HTTPMode.transparent))
+            >> DataReceived(tctx.client, b"GET / HTTP/1.1\r\n\r\n")
+            << http.HttpRequestHeadersHook(flow)
+            >> reply()
+            << http.HttpRequestHook(flow)
+            >> reply()
+            << OpenConnection(server)
+    )
+    assert server().address == ("192.0.2.42", 443)
+    assert server().sni == "example.com"
+
+
+def test_original_server_disconnects(tctx):
+    """Test that we correctly handle the case where the initial server conn is just closed."""
+    tctx.server.state = ConnectionState.OPEN
+    assert (
+            Playbook(http.HttpLayer(tctx, HTTPMode.transparent))
+            >> ConnectionClosed(tctx.server)
+            << CloseConnection(tctx.server)
+    )
+
+
+def test_request_smuggling(tctx):
+    """Test that we reject request smuggling"""
+    err = Placeholder(bytes)
+    assert (
+        Playbook(http.HttpLayer(tctx, HTTPMode.regular), hooks=False)
+        >> DataReceived(tctx.client, b"GET http://example.com/ HTTP/1.1\r\n"
+                                     b"Host: example.com\r\n"
+                                     b"Content-Length: 42\r\n"
+                                     b"Transfer-Encoding: chunked\r\n\r\n")
+        << SendData(tctx.client, err)
+        << CloseConnection(tctx.client)
+    )
+    assert b"Received both a Transfer-Encoding and a Content-Length header" in err()
+
+
+def test_request_smuggling_whitespace(tctx):
+    """Test that we reject header names with whitespace"""
+    err = Placeholder(bytes)
+    assert (
+        Playbook(http.HttpLayer(tctx, HTTPMode.regular), hooks=False)
+        >> DataReceived(tctx.client, b"GET http://example.com/ HTTP/1.1\r\n"
+                                     b"Host: example.com\r\n"
+                                     b"Content-Length : 42\r\n\r\n")
+        << SendData(tctx.client, err)
+        << CloseConnection(tctx.client)
+    )
+    assert b"Received an invalid header name" in err()
+
+
+def test_request_smuggling_validation_disabled(tctx):
+    """Test that we don't reject request smuggling when validation is disabled."""
+    tctx.options.validate_inbound_headers = False
+    assert (
+        Playbook(http.HttpLayer(tctx, HTTPMode.regular), hooks=False)
+        >> DataReceived(tctx.client, b"GET http://example.com/ HTTP/1.1\r\n"
+                                     b"Host: example.com\r\n"
+                                     b"Content-Length: 4\r\n"
+                                     b"Transfer-Encoding: chunked\r\n\r\n"
+                                     b"4\r\n"
+                                     b"abcd\r\n"
+                                     b"0\r\n"
+                                     b"\r\n")
+        << OpenConnection(Placeholder(Server))
+    )
+
+
+def test_request_smuggling_te_te(tctx):
+    """Test that we reject transfer-encoding headers that are weird in some way"""
+    err = Placeholder(bytes)
+    assert (
+        Playbook(http.HttpLayer(tctx, HTTPMode.regular), hooks=False)
+        >> DataReceived(tctx.client, ("GET http://example.com/ HTTP/1.1\r\n"
+                                      "Host: example.com\r\n"
+                                      "Transfer-Encoding: chunKed\r\n\r\n").encode())  # note the non-standard "K"
+        << SendData(tctx.client, err)
+        << CloseConnection(tctx.client)
+    )
+    assert b"Invalid transfer encoding" in err()
+
+
+def test_invalid_content_length(tctx):
+    """Test that we still trigger flow hooks for requests with semantic errors"""
+    err = Placeholder(bytes)
+    flow = Placeholder(HTTPFlow)
+    assert (
+        Playbook(http.HttpLayer(tctx, HTTPMode.regular))
+        >> DataReceived(tctx.client, (b"GET http://example.com/ HTTP/1.1\r\n"
+                                      b"Host: example.com\r\n"
+                                      b"Content-Length: NaN\r\n\r\n"))
+        << SendData(tctx.client, err)
+        << CloseConnection(tctx.client)
+        << http.HttpRequestHeadersHook(flow)
+        >> reply()
+        << http.HttpErrorHook(flow)
+        >> reply()
+    )
+    assert b"Invalid Content-Length header" in err()
+
+
+def test_chunked_and_content_length_set_by_addon(tctx):
+    """Test that we don't crash when an addon sets a transfer-encoding header
+
+    We reject a request with both transfer-encoding and content-length header to
+    thwart request smuggling, but if a user explicitly sets it we should not crash.
+    """
+    server = Placeholder(Server)
+    flow = Placeholder(HTTPFlow)
+
+    def make_chunked(flow: HTTPFlow):
+        if flow.response:
+            flow.response.headers["Transfer-Encoding"] = "chunked"
+        else:
+            flow.request.headers["Transfer-Encoding"] = "chunked"
+
+    assert (
+            Playbook(http.HttpLayer(tctx, HTTPMode.regular))
+            >> DataReceived(tctx.client, b"POST http://example.com/ HTTP/1.1\r\n"
+                                         b"Host: example.com\r\n"
+                                         b"Content-Length: 0\r\n\r\n")
+            << http.HttpRequestHeadersHook(flow)
+            >> reply(side_effect=make_chunked)
+            << http.HttpRequestHook(flow)
+            >> reply()
+            << OpenConnection(server)
+            >> reply(None)
+            << SendData(server, b"POST / HTTP/1.1\r\n"
+                                b"Host: example.com\r\n"
+                                b"Content-Length: 0\r\n"
+                                b"Transfer-Encoding: chunked\r\n\r\n"
+                                b"0\r\n\r\n")
+            >> DataReceived(server, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+            << http.HttpResponseHeadersHook(flow)
+            >> reply()
+            << http.HttpResponseHook(flow)
+            >> reply(side_effect=make_chunked)
+            << SendData(tctx.client, b"HTTP/1.1 200 OK\r\n"
+                                     b"Content-Length: 0\r\n"
+                                     b"Transfer-Encoding: chunked\r\n\r\n"
+                                     b"0\r\n\r\n")
+    )
+
+
+def test_connect_more_newlines(tctx):
+    """Ignore superfluous \r\n in CONNECT request, https://github.com/mitmproxy/mitmproxy/issues/4870"""
+    server = Placeholder(Server)
+    playbook = Playbook(http.HttpLayer(tctx, HTTPMode.regular))
+    nl = Placeholder(layer.NextLayer)
+
+    assert (
+        playbook
+        >> DataReceived(tctx.client, b"CONNECT example.com:80 HTTP/1.1\r\n\r\n\r\n")
+        << http.HttpConnectHook(Placeholder())
+        >> reply()
+        << OpenConnection(server)
+        >> reply(None)
+        << SendData(tctx.client, b'HTTP/1.1 200 Connection established\r\n\r\n')
+        >> DataReceived(tctx.client, b"\x16\x03\x03\x00\xb3\x01\x00\x00\xaf\x03\x03")
+        << layer.NextLayerHook(nl)
+    )
+    assert nl().data_client() == b"\x16\x03\x03\x00\xb3\x01\x00\x00\xaf\x03\x03"

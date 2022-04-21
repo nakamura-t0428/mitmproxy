@@ -1,6 +1,5 @@
 from typing import Any, Callable, Dict, Iterator, Type
 
-from mitmproxy import controller
 from mitmproxy import flow
 from mitmproxy import hooks
 from mitmproxy import http
@@ -24,10 +23,7 @@ def _iterate_http(f: http.HTTPFlow) -> TEventGenerator:
         for m in message_queue:
             f.websocket.messages.append(m)
             yield layers.websocket.WebsocketMessageHook(f)
-        if f.error:
-            yield layers.websocket.WebsocketErrorHook(f)
-        else:
-            yield layers.websocket.WebsocketEndHook(f)
+        yield layers.websocket.WebsocketEndHook(f)
     elif f.error:
         yield layers.http.HttpErrorHook(f)
 
@@ -35,7 +31,6 @@ def _iterate_http(f: http.HTTPFlow) -> TEventGenerator:
 def _iterate_tcp(f: tcp.TCPFlow) -> TEventGenerator:
     messages = f.messages
     f.messages = []
-    f.reply = controller.DummyReply()
     yield layers.tcp.TcpStartHook(f)
     while messages:
         f.messages.append(messages.pop(0))

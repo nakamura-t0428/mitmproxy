@@ -27,7 +27,7 @@ class _Masked:
         other[1] &= 0b0111_1111  # remove mask bit
         assert other[1] < 126  # (we don't support extended payload length here)
         mask = other[2:6]
-        payload = bytes([x ^ mask[i % 4] for i, x in enumerate(other[6:])])
+        payload = bytes(x ^ mask[i % 4] for i, x in enumerate(other[6:]))
         return self.unmasked == other[:2] + payload
 
 
@@ -41,7 +41,7 @@ def masked_bytes(unmasked: bytes) -> bytes:
     assert header[1] < 126  # assert that this is neither masked nor extended payload
     header[1] |= 0b1000_0000
     mask = secrets.token_bytes(4)
-    masked = bytes([x ^ mask[i % 4] for i, x in enumerate(unmasked[2:])])
+    masked = bytes(x ^ mask[i % 4] for i, x in enumerate(unmasked[2:]))
     return bytes(header + mask + masked)
 
 
@@ -95,14 +95,74 @@ def test_upgrade(tctx):
             << websocket.WebsocketMessageHook(flow)
             >> reply()
             << SendData(tctx.client, b"\x82\nhello back")
+            >> DataReceived(tctx.client, masked_bytes(b"\x81\x0bhello again"))
+            << websocket.WebsocketMessageHook(flow)
+            >> reply()
+            << SendData(tctx.server, masked(b"\x81\x0bhello again"))
     )
-    assert len(flow().websocket.messages) == 2
+    assert len(flow().websocket.messages) == 3
     assert flow().websocket.messages[0].content == b"hello world"
     assert flow().websocket.messages[0].from_client
     assert flow().websocket.messages[0].type == Opcode.TEXT
     assert flow().websocket.messages[1].content == b"hello back"
     assert flow().websocket.messages[1].from_client is False
     assert flow().websocket.messages[1].type == Opcode.BINARY
+    assert flow().live
+
+
+def test_upgrade_streamed(tctx):
+    """If the HTTP response is streamed, we may get early data from the client."""
+    tctx.server.address = ("example.com", 80)
+    tctx.server.state = ConnectionState.OPEN
+    flow = Placeholder(HTTPFlow)
+
+    def enable_streaming(flow: HTTPFlow):
+        flow.response.stream = True
+
+    assert (
+            Playbook(http.HttpLayer(tctx, HTTPMode.transparent))
+            >> DataReceived(tctx.client,
+                            b"GET / HTTP/1.1\r\n"
+                            b"Connection: upgrade\r\n"
+                            b"Upgrade: websocket\r\n"
+                            b"Sec-WebSocket-Version: 13\r\n"
+                            b"\r\n")
+            << http.HttpRequestHeadersHook(flow)
+            >> reply()
+            << http.HttpRequestHook(flow)
+            >> reply()
+            << SendData(tctx.server, b"GET / HTTP/1.1\r\n"
+                                     b"Connection: upgrade\r\n"
+                                     b"Upgrade: websocket\r\n"
+                                     b"Sec-WebSocket-Version: 13\r\n"
+                                     b"\r\n")
+            >> DataReceived(tctx.server, b"HTTP/1.1 101 Switching Protocols\r\n"
+                                         b"Upgrade: websocket\r\n"
+                                         b"Connection: Upgrade\r\n"
+                                         b"\r\n")
+            << http.HttpResponseHeadersHook(flow)
+            >> reply(side_effect=enable_streaming)
+            << SendData(tctx.client, b"HTTP/1.1 101 Switching Protocols\r\n"
+                                     b"Upgrade: websocket\r\n"
+                                     b"Connection: Upgrade\r\n"
+                                     b"\r\n")
+            << http.HttpResponseHook(flow)
+            >> DataReceived(tctx.client, masked_bytes(b"\x81\x0bhello world"))  # early !!
+            >> reply(to=-2)
+            << websocket.WebsocketStartHook(flow)
+            >> reply()
+            << websocket.WebsocketMessageHook(flow)
+            >> reply()
+            << SendData(tctx.server, masked(b"\x81\x0bhello world"))
+            >> DataReceived(tctx.server, b"\x82\nhello back")
+            << websocket.WebsocketMessageHook(flow)
+            >> reply()
+            << SendData(tctx.client, b"\x82\nhello back")
+            >> DataReceived(tctx.client, masked_bytes(b"\x81\x0bhello again"))
+            << websocket.WebsocketMessageHook(flow)
+            >> reply()
+            << SendData(tctx.server, masked(b"\x81\x0bhello again"))
+    )
 
 
 @pytest.fixture()
@@ -143,6 +203,23 @@ def test_modify_message(ws_testdata):
     )
 
 
+def test_empty_message(ws_testdata):
+    tctx, playbook, flow = ws_testdata
+    assert (
+            playbook
+            << websocket.WebsocketStartHook(flow)
+            >> reply()
+            >> DataReceived(tctx.server, b"\x81\x00")
+            << websocket.WebsocketMessageHook(flow)
+    )
+    assert flow.websocket.messages[-1].content == b""
+    assert (
+            playbook
+            >> reply()
+            << SendData(tctx.client, b"\x81\x00")
+    )
+
+
 def test_drop_message(ws_testdata):
     tctx, playbook, flow = ws_testdata
     assert (
@@ -152,7 +229,7 @@ def test_drop_message(ws_testdata):
             >> DataReceived(tctx.server, b"\x81\x03foo")
             << websocket.WebsocketMessageHook(flow)
     )
-    flow.websocket.messages[-1].kill()
+    flow.websocket.messages[-1].drop()
     assert (
             playbook
             >> reply()
@@ -176,6 +253,26 @@ def test_fragmented(ws_testdata):
     assert flow.websocket.messages[-1].content == b"foobar"
 
 
+def test_unfragmented(ws_testdata):
+    tctx, playbook, flow = ws_testdata
+    assert (
+            playbook
+            << websocket.WebsocketStartHook(flow)
+            >> reply()
+            >> DataReceived(tctx.server, b"\x81\x06foo")
+    )
+    # This already triggers wsproto to emit a wsproto.events.Message, see
+    # https://github.com/mitmproxy/mitmproxy/issues/4701
+    assert(
+            playbook
+            >> DataReceived(tctx.server, b"bar")
+            << websocket.WebsocketMessageHook(flow)
+            >> reply()
+            << SendData(tctx.client, b"\x81\x06foobar")
+    )
+    assert flow.websocket.messages[-1].content == b"foobar"
+
+
 def test_protocol_error(ws_testdata):
     tctx, playbook, flow = ws_testdata
     assert (
@@ -188,11 +285,12 @@ def test_protocol_error(ws_testdata):
             << CloseConnection(tctx.server)
             << SendData(tctx.client, b"\x88/\x03\xeaexpected CONTINUATION, got <Opcode.BINARY: 2>")
             << CloseConnection(tctx.client)
-            << websocket.WebsocketErrorHook(flow)
+            << websocket.WebsocketEndHook(flow)
             >> reply()
 
     )
     assert not flow.websocket.messages
+    assert not flow.live
 
 
 def test_ping(ws_testdata):
@@ -233,6 +331,7 @@ def test_close_normal(ws_testdata):
     assert close() == b"\x88\x02\x03\xe8" or close() == b"\x88\x00"
 
     assert flow.websocket.close_code == 1005
+    assert not flow.live
 
 
 def test_close_disconnect(ws_testdata):
@@ -245,14 +344,17 @@ def test_close_disconnect(ws_testdata):
             << CloseConnection(tctx.server)
             << SendData(tctx.client, b"\x88\x02\x03\xe8")
             << CloseConnection(tctx.client)
-            << websocket.WebsocketErrorHook(flow)
+            << websocket.WebsocketEndHook(flow)
             >> reply()
             >> ConnectionClosed(tctx.client)
     )
-    assert "ABNORMAL_CLOSURE" in flow.error.msg
+    # The \x03\xe8 above is code 1000 (normal closure).
+    # But 1006 (ABNORMAL_CLOSURE) is expected, because the connection was already closed.
+    assert flow.websocket.close_code == 1006
+    assert not flow.live
 
 
-def test_close_error(ws_testdata):
+def test_close_code(ws_testdata):
     tctx, playbook, flow = ws_testdata
     assert (
             playbook
@@ -263,10 +365,11 @@ def test_close_error(ws_testdata):
             << CloseConnection(tctx.server)
             << SendData(tctx.client, b"\x88\x02\x0f\xa0")
             << CloseConnection(tctx.client)
-            << websocket.WebsocketErrorHook(flow)
+            << websocket.WebsocketEndHook(flow)
             >> reply()
     )
-    assert "UNKNOWN_ERROR=4000" in flow.error.msg
+    assert flow.websocket.close_code == 4000
+    assert not flow.live
 
 
 def test_deflate(ws_testdata):
@@ -304,7 +407,9 @@ def test_websocket_connection_repr(tctx):
 class TestFragmentizer:
     def test_empty(self):
         f = websocket.Fragmentizer([b"foo"], False)
-        assert list(f(b"")) == []
+        assert list(f(b"")) == [
+            wsproto.events.BytesMessage(b"", message_finished=True),
+        ]
 
     def test_keep_sizes(self):
         f = websocket.Fragmentizer([b"foo", b"bar"], True)
@@ -333,6 +438,7 @@ def test_inject_message(ws_testdata):
     )
     assert flow.websocket.messages[-1].content == b"hello"
     assert flow.websocket.messages[-1].from_client is False
+    assert flow.websocket.messages[-1].injected is True
     assert (
             playbook
             >> reply()

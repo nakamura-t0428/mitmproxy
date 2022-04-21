@@ -1,9 +1,7 @@
 import io
 import pytest
 from unittest.mock import patch
-
 from mitmproxy.test import tflow
-
 from mitmproxy import flowfilter, http
 
 
@@ -15,15 +13,23 @@ class TestParsing:
         assert c.getvalue()
 
     def test_parse_err(self):
-        assert flowfilter.parse("~h [") is None
+        with pytest.raises(ValueError, match="Empty filter"):
+            flowfilter.parse("")
+        with pytest.raises(ValueError, match="Invalid filter"):
+            flowfilter.parse("~b")
+        with pytest.raises(ValueError, match="Invalid filter"):
+            flowfilter.parse("~h [")
 
     def test_simple(self):
-        assert not flowfilter.parse("~b")
         assert flowfilter.parse("~q")
         assert flowfilter.parse("~c 10")
         assert flowfilter.parse("~m foobar")
         assert flowfilter.parse("~u foobar")
         assert flowfilter.parse("~q ~c 10")
+        assert flowfilter.parse("~replay")
+        assert flowfilter.parse("~replayq")
+        assert flowfilter.parse("~replays")
+        assert flowfilter.parse("~comment .")
         p = flowfilter.parse("~q ~c 10")
         self._dump(p)
         assert len(p.lst) == 2
@@ -141,8 +147,15 @@ class TestMatchingHTTPFlow:
     def test_fmarked(self):
         q = self.req()
         assert not self.q("~marked", q)
-        q.marked = True
+        q.marked = ":default:"
         assert self.q("~marked", q)
+
+    def test_fmarker_char(self):
+        t = tflow.tflow()
+        t.marked = ":default:"
+        assert not self.q("~marker X", t)
+        t.marked = 'X'
+        assert self.q("~marker X", t)
 
     def test_head(self):
         q = self.req()
@@ -296,6 +309,31 @@ class TestMatchingHTTPFlow:
         assert self.q("!~c 201 !~c 202", s)
         assert not self.q("!~c 201 !~c 200", s)
 
+    def test_replay(self):
+        f = tflow.tflow()
+        assert not self.q("~replay", f)
+        f.is_replay = "request"
+        assert self.q("~replay", f)
+        assert self.q("~replayq", f)
+        assert not self.q("~replays", f)
+        f.is_replay = "response"
+        assert self.q("~replay", f)
+        assert not self.q("~replayq", f)
+        assert self.q("~replays", f)
+
+    def test_metadata(self):
+        f = tflow.tflow()
+        f.metadata["a"] = 1
+        f.metadata["b"] = "string"
+        f.metadata["c"] = {"key": "value"}
+        assert self.q("~meta a", f)
+        assert not self.q("~meta no", f)
+        assert self.q("~meta string", f)
+        assert self.q("~meta key", f)
+        assert self.q("~meta value", f)
+        assert self.q("~meta \"b: string\"", f)
+        assert self.q("~meta \"'key': 'value'\"", f)
+
 
 class TestMatchingTCPFlow:
 
@@ -427,9 +465,6 @@ class TestMatchingWebSocketFlow:
     def flow(self) -> http.HTTPFlow:
         return tflow.twebsocketflow()
 
-    def err(self) -> http.HTTPFlow:
-        return tflow.twebsocketflow(err=True)
-
     def q(self, q, o):
         return flowfilter.parse(q)(o)
 
@@ -449,10 +484,6 @@ class TestMatchingWebSocketFlow:
         assert not self.q("~websocket", f)
         f = tflow.tflow(resp=True)
         assert not self.q("~websocket", f)
-
-    def test_ferr(self):
-        e = self.err()
-        assert self.q("~e", e)
 
     def test_domain(self):
         q = self.flow()
@@ -541,6 +572,8 @@ class TestMatchingDummyFlow:
         f = self.flow()
         f.server_conn = tflow.tserver_conn()
 
+        assert self.q("~all", f)
+
         assert not self.q("~a", f)
 
         assert not self.q("~b whatever", f)
@@ -581,6 +614,10 @@ class TestMatchingDummyFlow:
         assert not self.q("~u whatever", f)
 
         assert not self.q("~q", f)
+
+        assert not self.q("~comment .", f)
+        f.comment = "comment"
+        assert self.q("~comment .", f)
 
 
 @patch('traceback.extract_tb')

@@ -62,7 +62,7 @@ def get_random_object(random=random, depth=0):
             else:
                 return -1 * random.randint(0, MAXINT)
         n = random.randint(0, 100)
-        return bytes([random.randint(32, 126) for _ in range(n)])
+        return bytes(random.randint(32, 126) for _ in range(n))
 
 
 class Test_Format(unittest.TestCase):
@@ -122,7 +122,7 @@ class Test_FileLoading(unittest.TestCase):
 
     def test_error_on_absurd_lengths(self):
         s = io.BytesIO()
-        s.write(b'1000000000:pwned!,')
+        s.write(b'1000000000000:pwned!,')
         s.seek(0)
         with self.assertRaises(ValueError):
             tnetstring.load(s)

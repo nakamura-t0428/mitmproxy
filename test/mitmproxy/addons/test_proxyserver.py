@@ -3,10 +3,11 @@ from contextlib import asynccontextmanager
 
 import pytest
 
+from mitmproxy import exceptions
 from mitmproxy.addons.proxyserver import Proxyserver
-from mitmproxy.proxy.layers.http import HTTPMode
-from mitmproxy.proxy import layers, server_hooks
 from mitmproxy.connection import Address
+from mitmproxy.proxy import layers, server_hooks
+from mitmproxy.proxy.layers.http import HTTPMode
 from mitmproxy.test import taddons, tflow
 from mitmproxy.test.tflow import tclient_conn, tserver_conn
 
@@ -40,7 +41,6 @@ async def tcp_server(handle_conn) -> Address:
         server.close()
 
 
-@pytest.mark.asyncio
 async def test_start_stop():
     async def server_handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         assert await reader.readuntil(b"\r\n\r\n") == b"GET /hello HTTP/1.1\r\n\r\n"
@@ -55,7 +55,7 @@ async def test_start_stop():
         async with tcp_server(server_handler) as addr:
             tctx.configure(ps, listen_host="127.0.0.1", listen_port=0)
             assert not ps.server
-            ps.running()
+            await ps.running()
             await tctx.master.await_log("Proxy server listening", level="info")
             assert ps.server
 
@@ -88,8 +88,7 @@ async def test_start_stop():
             assert repr(ps) == "ProxyServer(stopped, 0 active conns)"
 
 
-@pytest.mark.asyncio
-async def test_inject():
+async def test_inject() -> None:
     async def server_handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         while s := await reader.read(1):
             writer.write(s.upper())
@@ -100,7 +99,7 @@ async def test_inject():
         tctx.master.addons.add(state)
         async with tcp_server(server_handler) as addr:
             tctx.configure(ps, listen_host="127.0.0.1", listen_port=0)
-            ps.running()
+            await ps.running()
             await tctx.master.await_log("Proxy server listening", level="info")
             proxy_addr = ps.server.sockets[0].getsockname()[:2]
             reader, writer = await asyncio.open_connection(*proxy_addr)
@@ -111,44 +110,42 @@ async def test_inject():
 
             writer.write(b"a")
             assert await reader.read(1) == b"A"
-            ps.inject_tcp(state.flows[0], False, "b")
+            ps.inject_tcp(state.flows[0], False, b"b")
             assert await reader.read(1) == b"B"
-            ps.inject_tcp(state.flows[0], True, "c")
+            ps.inject_tcp(state.flows[0], True, b"c")
             assert await reader.read(1) == b"c"
 
 
-@pytest.mark.asyncio
-async def test_inject_fail():
+async def test_inject_fail() -> None:
     ps = Proxyserver()
     with taddons.context(ps) as tctx:
         ps.inject_websocket(
             tflow.tflow(),
             True,
-            "test"
+            b"test"
         )
         await tctx.master.await_log("Cannot inject WebSocket messages into non-WebSocket flows.", level="warn")
         ps.inject_tcp(
             tflow.tflow(),
             True,
-            "test"
+            b"test"
         )
         await tctx.master.await_log("Cannot inject TCP messages into non-TCP flows.", level="warn")
 
         ps.inject_websocket(
             tflow.twebsocketflow(),
             True,
-            "test"
+            b"test"
         )
         await tctx.master.await_log("Flow is not from a live connection.", level="warn")
         ps.inject_websocket(
             tflow.ttcpflow(),
             True,
-            "test"
+            b"test"
         )
         await tctx.master.await_log("Flow is not from a live connection.", level="warn")
 
 
-@pytest.mark.asyncio
 async def test_warn_no_nextlayer():
     """
     Test that we log an error if the proxy server is started without NextLayer addon.
@@ -157,7 +154,7 @@ async def test_warn_no_nextlayer():
     ps = Proxyserver()
     with taddons.context(ps) as tctx:
         tctx.configure(ps, listen_host="127.0.0.1", listen_port=0)
-        ps.running()
+        await ps.running()
         await tctx.master.await_log("Proxy server listening at", level="info")
         assert tctx.master.has_log("Warning: Running proxyserver without nextlayer addon!", level="warn")
         await ps.shutdown_server()
@@ -174,4 +171,28 @@ def test_self_connect():
         ps.server_connect(
             server_hooks.ServerConnectionHookData(server, client)
         )
-        assert server.error == "Stopped mitmproxy from recursively connecting to itself."
+        assert "Request destination unknown" in server.error
+
+
+def test_options():
+    ps = Proxyserver()
+    with taddons.context(ps) as tctx:
+        with pytest.raises(exceptions.OptionsError):
+            tctx.configure(ps, body_size_limit="invalid")
+        tctx.configure(ps, body_size_limit="1m")
+
+        with pytest.raises(exceptions.OptionsError):
+            tctx.configure(ps, stream_large_bodies="invalid")
+        tctx.configure(ps, stream_large_bodies="1m")
+
+
+async def test_startup_err(monkeypatch) -> None:
+    async def _raise(*_):
+        raise OSError("cannot bind")
+
+    monkeypatch.setattr(asyncio, "start_server", _raise)
+
+    ps = Proxyserver()
+    with taddons.context(ps) as tctx:
+        await ps.running()
+        await tctx.master.await_log("cannot bind", level="error")

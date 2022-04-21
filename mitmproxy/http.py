@@ -1,6 +1,9 @@
+import binascii
+import os
 import re
 import time
 import urllib.parse
+import json
 from dataclasses import dataclass
 from dataclasses import fields
 from email.utils import formatdate
@@ -16,6 +19,7 @@ from typing import Optional
 from typing import Tuple
 from typing import Union
 from typing import cast
+from typing import Any
 
 from mitmproxy import flow
 from mitmproxy.websocket import WebSocketData
@@ -86,7 +90,7 @@ class Headers(multidict.MultiDict):  # type: ignore
     >>> h.fields
 
     Caveats:
-     - For use with the "Set-Cookie" header, either use `Response.cookies` or see `Headers.get_all`.
+     - For use with the "Set-Cookie" and "Cookie" headers, either use `Response.cookies` or see `Headers.get_all`.
     """
 
     def __init__(self, fields: Iterable[Tuple[bytes, bytes]] = (), **headers):
@@ -94,7 +98,7 @@ class Headers(multidict.MultiDict):  # type: ignore
         *Args:*
          - *fields:* (optional) list of ``(name, value)`` header byte tuples,
            e.g. ``[(b"Host", b"example.com")]``. All names and values must be bytes.
-         - *\*\*headers:* Additional headers to set. Will overwrite existing values from `fields`.
+         - *\\*\\*headers:* Additional headers to set. Will overwrite existing values from `fields`.
            For convenience, underscores in header names will be transformed to dashes -
            this behaviour does not extend to other methods.
 
@@ -142,9 +146,12 @@ class Headers(multidict.MultiDict):  # type: ignore
     def get_all(self, name: Union[str, bytes]) -> List[str]:
         """
         Like `Headers.get`, but does not fold multiple headers into a single one.
-        This is useful for Set-Cookie headers, which do not support folding.
+        This is useful for Set-Cookie and Cookie headers, which do not support folding.
 
-        *See also:* <https://tools.ietf.org/html/rfc7230#section-3.2.2>
+        *See also:*
+         - <https://tools.ietf.org/html/rfc7230#section-3.2.2>
+         - <https://datatracker.ietf.org/doc/html/rfc6265#section-5.4>
+         - <https://datatracker.ietf.org/doc/html/rfc7540#section-8.1.2.5>
         """
         name = _always_bytes(name)
         return [
@@ -243,12 +250,16 @@ class Message(serializable.Serializable):
         self.data.set_state(state)
 
     data: MessageData
-    stream: Union[Callable[[bytes], bytes], bool] = False
+    stream: Union[Callable[[bytes], Union[Iterable[bytes], bytes]], bool] = False
     """
+    This attribute controls if the message body should be streamed.
+
+    If `False`, mitmproxy will buffer the entire body before forwarding it to the destination.
+    This makes it possible to perform string replacements on the entire body.
     If `True`, the message body will not be buffered on the proxy
-    but immediately streamed to the destination instead.
-    Alternatively, a transformation function can be specified, but please note
-    that packet should not be relied upon.
+    but immediately forwarded instead.
+    Alternatively, a transformation function can be specified, which will be called for each chunk of data.
+    Please note that packet boundaries generally should not be relied upon.
 
     This attribute must be set in the `requestheaders` or `responseheaders` hook.
     Setting it in `request` or  `response` is already too late, mitmproxy has buffered the message body already.
@@ -361,7 +372,13 @@ class Message(serializable.Serializable):
             # Let's remove it!
             del self.headers["content-encoding"]
             self.raw_content = value
-        self.headers["content-length"] = str(len(self.raw_content))
+
+        if "transfer-encoding" in self.headers:
+            # https://httpwg.org/specs/rfc7230.html#header.content-length
+            # don't set content-length if a transfer-encoding is provided
+            pass
+        else:
+            self.headers["content-length"] = str(len(self.raw_content))
 
     def get_content(self, strict: bool = True) -> Optional[bytes]:
         """
@@ -397,13 +414,14 @@ class Message(serializable.Serializable):
             if "json" in self.headers.get("content-type", ""):
                 enc = "utf8"
         if not enc:
-            meta_charset = re.search(rb"""<meta[^>]+charset=['"]?([^'">]+)""", content)
-            if meta_charset:
-                enc = meta_charset.group(1).decode("ascii", "ignore")
+            if "html" in self.headers.get("content-type", ""):
+                meta_charset = re.search(rb"""<meta[^>]+charset=['"]?([^'">]+)""", content, re.IGNORECASE)
+                if meta_charset:
+                    enc = meta_charset.group(1).decode("ascii", "ignore")
         if not enc:
             if "text/css" in self.headers.get("content-type", ""):
                 # @charset rule must be the very first thing.
-                css_charset = re.match(rb"""@charset "([^"]+)";""", content)
+                css_charset = re.match(rb"""@charset "([^"]+)";""", content, re.IGNORECASE)
                 if css_charset:
                     enc = css_charset.group(1).decode("ascii", "ignore")
         if not enc:
@@ -492,7 +510,26 @@ class Message(serializable.Serializable):
         self.headers["content-encoding"] = encoding
         self.content = self.raw_content
         if "content-encoding" not in self.headers:
-            raise ValueError("Invalid content encoding {}".format(repr(encoding)))
+            raise ValueError(f"Invalid content encoding {repr(encoding)}")
+
+    def json(self, **kwargs: Any) -> Any:
+        """
+        Returns the JSON encoded content of the response, if any.
+        `**kwargs` are optional arguments that will be
+        passed to `json.loads()`.
+
+        Will raise if the content can not be decoded and then parsed as JSON.
+
+        *Raises:*
+         - `json.decoder.JSONDecodeError` if content is not valid JSON.
+         - `TypeError` if the content is not available, for example because the response
+            has been streamed.
+        """
+        content = self.get_content(strict=False)
+        if content is None:
+            raise TypeError('Message content is not available.')
+        else:
+            return json.loads(content, **kwargs)
 
 
 class Request(Message):
@@ -940,8 +977,17 @@ class Request(Message):
         return ()
 
     def _set_multipart_form(self, value):
+        is_valid_content_type = self.headers.get("content-type", "").lower().startswith("multipart/form-data")
+        if not is_valid_content_type:
+            """
+            Generate a random boundary here.
+
+            See <https://datatracker.ietf.org/doc/html/rfc2046#section-5.1.1> for specifications
+            on generating the boundary.
+            """
+            boundary = "-" * 20 + binascii.hexlify(os.urandom(16)).decode()
+            self.headers["content-type"] = f"multipart/form-data; boundary={boundary}"
         self.content = multipart.encode(self.headers, value)
-        self.headers["content-type"] = "multipart/form-data"
 
     @property
     def multipart_form(self) -> multidict.MultiDictView[bytes, bytes]:
@@ -987,7 +1033,7 @@ class Response(Message):
             reason = reason.encode("ascii", "strict")
 
         if isinstance(content, str):
-            raise ValueError("Content must be bytes, not {}".format(type(content).__name__))
+            raise ValueError(f"Content must be bytes, not {type(content).__name__}")
         if not isinstance(headers, Headers):
             headers = Headers(headers)
         if trailers is not None and not isinstance(trailers, Headers):
@@ -1140,7 +1186,10 @@ class Response(Message):
                 d = parsedate_tz(self.headers[i])
                 if d:
                     new = mktime_tz(d) + delta
-                    self.headers[i] = formatdate(new, usegmt=True)
+                    try:
+                        self.headers[i] = formatdate(new, usegmt=True)
+                    except OSError:  # pragma: no cover
+                        pass  # value out of bounds on Windows only (which is why we exclude it from coverage).
         c = []
         for set_cookie_header in self.headers.get_all("set-cookie"):
             try:

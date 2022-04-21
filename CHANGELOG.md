@@ -2,7 +2,115 @@
 
 ## Unreleased: mitmproxy next
 
-### New Proxy Core (@mhils)
+* Replayed flows retain their current position in the flow list.
+  ([#5227](https://github.com/mitmproxy/mitmproxy/issues/5227), @mhils)
+* Console Performance Improvements
+  ([#3427](https://github.com/mitmproxy/mitmproxy/issues/3427), @BkPHcgQL3V)
+* Warn users if server side event responses are received without streaming.
+  ([#4469](https://github.com/mitmproxy/mitmproxy/issues/4469), @mhils)
+* Add flatpak support to the browser addon
+  ([#5200](https://github.com/mitmproxy/mitmproxy/issues/5200), @pauloromeira)
+* Add example addon to dump contents to files based on a filter expression 
+  ([#5190](https://github.com/mitmproxy/mitmproxy/issues/5190), @redraw)
+* Fix a bug where the wrong SNI is sent to an upstream HTTPS proxy
+  ([#5109](https://github.com/mitmproxy/mitmproxy/issues/5109), @mhils)
+* Make sure that mitmproxy displays error messages on startup.
+  ([#5225](https://github.com/mitmproxy/mitmproxy/issues/5225), @mhils)
+* Add example addon for domain fronting.
+  ([#5217](https://github.com/mitmproxy/mitmproxy/issues/5217), @randomstuff)
+* Improve cut addon to better handle binary contents
+  ([#3965](https://github.com/mitmproxy/mitmproxy/issues/3965), @mhils)
+* Fix text truncation for full-width characters 
+  ([#4278](https://github.com/mitmproxy/mitmproxy/issues/4278), @kjy00302)
+* Fix mitmweb export copy failed in non-secure domain.
+  ([#5264](https://github.com/mitmproxy/mitmproxy/issues/5264), @Pactortester)
+  
+## 19 March 2022: mitmproxy 8.0.0
+
+### Major Changes
+
+* Major improvements to the web interface (@gorogoroumaru)
+* Event hooks can now be async (@nneonneo, [#5106](https://github.com/mitmproxy/mitmproxy/issues/5106))
+* New [`tls_{established,failed}_{client,server}` event hooks](https://docs.mitmproxy.org/dev/api/events.html#TLSEvents)
+  to record negotiation success/failure (@mhils, [#4790](https://github.com/mitmproxy/mitmproxy/pull/4790))
+
+### Security Fixes
+
+* [CVE-2022-24766](https://github.com/mitmproxy/mitmproxy/security/advisories/GHSA-gcx2-gvj7-pxv3):
+  Fix request smuggling vulnerability reported by @zeyu2001 (@mhils)
+
+### Full Changelog
+
+* Support proxy authentication for SOCKS v5 mode (@starplanet)
+* Make it possible to ignore connections in the tls_clienthello event hook (@mhils)
+* fix some responses not being decoded properly if the encoding was uppercase (#4735, @Mattwmaster58)
+* Trigger event hooks for flows with semantically invalid requests, for example invalid content-length headers (@mhils)
+* Improve error message on TLS version mismatch (@mhils)
+* Windows: Switch to Python's default asyncio event loop, which increases the number of sockets
+  that can be processed simultaneously (@mhils)
+* Add `client_replay_concurrency` option, which allows more than one client replay request to be in-flight at a time. (@rbdixon)
+* New content view which handles gRPC/protobuf. Allows to apply custom definitions to visualize different field decodings.
+  Includes example addon which applies custom definitions for selected gRPC traffic (@mame82)
+* Fix a crash caused when editing string option (#4852, @rbdixon)
+* Base container image bumped to Debian 11 Bullseye (@Kriechi)
+* Upstream replays don't do CONNECT on plaintext HTTP requests (#4876, @HoffmannP)
+* Remove workarounds for old pyOpenSSL versions (#4831, @KarlParkinson)
+* Add fonts to asset filter (~a) (#4928, @elespike)
+* Fix bug that crashed when using `view.flows.resolve` (#4916, @rbdixon)
+* Fix a bug where `running()` is invoked twice on startup (#3584, @mhils)
+* Correct documentation example for User-Agent header modification (#4997, @jamesyale)
+* Fix random connection stalls (#5040, @EndUser509)
+* Add `n` new flow keybind to mitmweb (#5061, @ianklatzco)
+* Fix compatibility with BoringSSL (@pmoulton)
+* Added `WebSocketMessage.injected` flag (@Prinzhorn)
+* Add example addon for saving streamed data to individual files (@EndUser509)
+* Change connection event hooks to be blocking.
+  Processing will only resume once the event hook has finished. (@Prinzhorn)
+* Reintroduce `Flow.live`, which signals if a flow belongs to a currently active connection. (#4207, @mhils)
+* Speculative fix for some rare HTTP/2 connection stalls (#5158, @EndUser509)
+* Add ability to specify custom ports with LDAP authentication (#5068, @demonoidvk)
+* Add support for rotating saved streams every hour or day (@EndUser509)
+* Console Improvements on Windows (@mhils)
+* Fix processing of `--set` options (#5067, @marwinxxii) 
+* Lowercase user-added header names and emit a log message to notify the user when using HTTP/2 (#4746, @mhils)
+* Exit early if there are errors on startup (#4544, @mhils)
+* Fixed encoding guessing: only search for meta tags in HTML bodies (##4566, @Prinzhorn)
+* Binaries are now built with Python 3.10 (@mhils)
+
+## 28 September 2021: mitmproxy 7.0.4
+
+* Do not add a Content-Length header for chunked HTTP/1 messages (@matthewhughes934)
+
+## 16 September 2021: mitmproxy 7.0.3
+
+* [CVE-2021-39214](https://github.com/mitmproxy/mitmproxy/security/advisories/GHSA-22gh-3r9q-xf38):
+  Fix request smuggling vulnerabilities reported by @chinchila (@mhils)
+* Expose TLS 1.0 as possible minimum version on older pyOpenSSL releases (@mhils)
+* Fix compatibility with Python 3.10 (@mhils)
+
+## 4 August 2021: mitmproxy 7.0.2
+
+* Fix a WebSocket crash introduced in 7.0.1 (@mhils)
+
+## 3 August 2021: mitmproxy 7.0.1
+
+* Performance: Re-use OpenSSL contexts to enable TLS session resumption (@mhils)
+* Disable HTTP/2 CONNECT for Secure Web Proxies to fix compatibility with Firefox (@mhils)
+* Use local IP address as certificate subject if no other info is available (@mhils)
+* Make it possible to return multiple chunks for HTTP stream modification (@mhils)
+* Don't send WebSocket CONTINUATION frames when the peer does not send any (@Pilphe)
+* Fix HTTP stream modify example. (@mhils)
+* Fix a crash caused by no-op assignments to `Server.address` (@SaladDais)
+* Fix a crash when encountering invalid certificates (@mhils)
+* Fix a crash when pressing the Home/End keys in some screens (@rbdixon)
+* Fix a crash when reading corrupted flow dumps (@mhils)
+* Fix multiple crashes on flow export (@mhils)
+* Fix a bug where ASGI apps did not see the request body (@mhils)
+* Minor documentation improvements (@mhils)
+
+## 16 July 2021: mitmproxy 7.0
+
+### New Proxy Core (@mhils, [blog post](https://www.mitmproxy.org/posts/releases/mitmproxy7/))
 
 Mitmproxy has a completely new proxy core, fixing many longstanding issues:
 
@@ -24,18 +132,8 @@ Mitmproxy has a completely new proxy core, fixing many longstanding issues:
   This greatly improves testing capabilities, prevents a wide array of race conditions, and increases
   proper isolation between layers.
 
-We wanted to bring these improvements out, so we have a few temporary regressions:
+### Additional Changes
 
-* Support for HTTP/2 Push Promises has been dropped.
-* body_size_limit is currently unsupported.
-* upstream_auth is currently unsupported.
-
-If you depend on these features, please raise your voice in
-[#4348](https://github.com/mitmproxy/mitmproxy/issues/4348)!
-
-### Full Changelog
-
-* New Proxy Core based on sans-io pattern (@mhils)
 * mitmproxy's command line interface now supports Windows (@mhils)
 * The `clientconnect`, `clientdisconnect`, `serverconnect`, `serverdisconnect`, and `log`
   events have been replaced with new events, see addon documentation for details (@mhils)
@@ -55,11 +153,28 @@ If you depend on these features, please raise your voice in
 * Pressing `?` now exits console help view (@abitrolly)
 * `--modify-headers` now works correctly when modifying a header that is also part of the filter expression (@Prinzhorn)
 * Fix SNI-related reproducibility issues when exporting to curl/httpie commands. (@dkasak)
-* Add option `export_preserve_original_ip` to force exported command to connect to IP from original request. Only supports curl at the moment. (@dkasak)
+* Add option `export_preserve_original_ip` to force exported command to connect to IP from original request.
+  Only supports curl at the moment. (@dkasak)
 * Major proxy protocol testing (@r00t-)
 * Switch Docker image release to be based on Debian (@PeterDaveHello)
-* --- TODO: add new PRs above this line ---
-* ... and various other fixes, documentation improvements, dependency version bumps, etc.
+* Multiple Browsers: The `browser.start` command may be executed more than once to start additional
+  browser sessions. (@rbdixon)
+* Improve readability of SHA256 fingerprint. (@wrekone)
+* Metadata and Replay Flow Filters: Flows may be filtered based on metadata and replay status. (@rbdixon)
+* Flow control: don't read connection data faster than it can be forwarded. (@hazcod)
+* Docker images for ARM64 architecture (@hazcod, @mhils)
+* Fix parsing of certificate issuer/subject with escaped special characters (@Prinzhorn)
+* Customize markers with emoji, and filters: The `flow.mark` command may be used to mark a flow with either the default
+  "red ball" marker, a single character, or an emoji like `:grapes:`. Use the `~marker` filter to filter on marker
+  characters. (@rbdixon)
+* New `flow.comment` command to add a comment to the flow. Add `~comment <regex>` filter syntax to search flow comments.
+  (@rbdixon)
+* Fix multipart forms losing `boundary` values on edit. (@roytu)
+* `Transfer-Encoding: chunked` HTTP message bodies are now retained if they are below the stream_large_bodies limit.
+  (@mhils)
+* `json()` method for HTTP Request and Response instances will return decoded JSON body. (@rbdixon)
+* Support for HTTP/2 Push Promises has been dropped. (@mhils)
+* Make it possible to set sequence options from the command line. (@Yopi)
 
 ## 15 December 2020: mitmproxy 6.0.2
 

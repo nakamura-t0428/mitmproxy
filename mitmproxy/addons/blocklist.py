@@ -28,8 +28,6 @@ def parse_spec(option: str) -> BlockSpec:
     except ValueError:
         raise ValueError(f"Invalid HTTP status code: {status}")
     flow_filter = flowfilter.parse(flow_patt)
-    if not flow_filter:
-        raise ValueError(f"Invalid filter pattern: {flow_patt}")
     if not RESPONSES.get(status_code):
         raise ValueError(f"Invalid HTTP status code: {status}")
 
@@ -63,7 +61,7 @@ class BlockList:
                 self.items.append(spec)
 
     def request(self, flow: http.HTTPFlow) -> None:
-        if flow.response or flow.error or (flow.reply and flow.reply.state == "taken"):
+        if flow.response or flow.error or not flow.live:
             return
 
         for spec in self.items:

@@ -1,5 +1,8 @@
 import os
+from datetime import datetime, timezone
 from pathlib import Path
+from cryptography import x509
+from cryptography.x509 import NameOID
 
 import pytest
 
@@ -163,6 +166,7 @@ class TestCert:
         assert c1.cn == "google.com"
         assert len(c1.altnames) == 436
         assert c1.organization == "Google Inc"
+        assert hash(c1)
 
         with open(tdata.path("mitmproxy/net/data/text_cert_2"), "rb") as f:
             d = f.read()
@@ -170,14 +174,31 @@ class TestCert:
         assert c2.cn == "www.inode.co.nz"
         assert len(c2.altnames) == 2
         assert c2.fingerprint()
-        assert c2.notbefore
-        assert c2.notafter
+        assert c2.notbefore == datetime(
+            year=2010,
+            month=1,
+            day=11,
+            hour=19,
+            minute=27,
+            second=36,
+            tzinfo=timezone.utc,
+        )
+        assert c2.notafter == datetime(
+            year=2011,
+            month=1,
+            day=12,
+            hour=9,
+            minute=14,
+            second=55,
+            tzinfo=timezone.utc,
+        )
         assert c2.subject
         assert c2.keyinfo == ("RSA", 2048)
         assert c2.serial
         assert c2.issuer
         assert c2.to_pem()
         assert c2.has_expired() is not None
+        assert repr(c2) == "<Cert(cn='www.inode.co.nz', altnames=['www.inode.co.nz', 'inode.co.nz'])>"
 
         assert c1 != c2
 
@@ -231,3 +252,26 @@ class TestCert:
 
         with pytest.raises(TypeError):
             tstore.add_cert_file("encrypted-no-pass", Path(tdata.path("mitmproxy/data/mitmproxy.pem")), None)
+
+    def test_special_character(self, tdata):
+        with open(tdata.path("mitmproxy/net/data/text_cert_with_comma"), "rb") as f:
+            d = f.read()
+        c = certs.Cert.from_pem(d)
+
+        assert dict(c.issuer).get('O') == 'DigiCert, Inc.'
+        assert dict(c.subject).get('O') == 'GitHub, Inc.'
+
+    def test_multi_valued_rdns(self, tdata):
+        subject = x509.Name([
+            x509.RelativeDistinguishedName([
+                x509.NameAttribute(NameOID.TITLE, 'Test'),
+                x509.NameAttribute(NameOID.COMMON_NAME, 'Multivalue'),
+                x509.NameAttribute(NameOID.SURNAME, 'RDNs'),
+                x509.NameAttribute(NameOID.ORGANIZATION_NAME, 'TSLA'),
+            ]),
+            x509.RelativeDistinguishedName([
+                x509.NameAttribute(NameOID.ORGANIZATION_NAME, 'PyCA')
+            ]),
+        ])
+        expected = [('2.5.4.12', 'Test'), ('CN', 'Multivalue'), ('2.5.4.4', 'RDNs'), ('O', 'TSLA'), ('O', 'PyCA')]
+        assert(certs._name_to_keyval(subject)) == expected

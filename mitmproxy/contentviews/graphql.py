@@ -20,7 +20,7 @@ def format_query_list(data: typing.List[typing.Any]):
     num_queries = len(data) - 1
     result = ""
     for i, op in enumerate(data):
-        result += "--- {i}/{num_queries}\n".format(i=i, num_queries=num_queries)
+        result += f"--- {i}/{num_queries}\n"
         result += format_graphql(op)
     return result
 
@@ -45,7 +45,7 @@ class ViewGraphQL(base.View):
                 return "GraphQL", base.format_text(format_query_list(data))
 
     def render_priority(self, data: bytes, *, content_type: typing.Optional[str] = None, **metadata) -> float:
-        if content_type != "application/json":
+        if content_type != "application/json" or not data:
             return 0
 
         data = parse_json(data)

@@ -4,7 +4,7 @@ from mitmproxy.http import Headers
 from mitmproxy.net.http.http1.read import (
     read_request_head,
     read_response_head, connection_close, expected_http_body_size,
-    _read_request_line, _read_response_line, _read_headers, get_header_tokens
+    _read_request_line, _read_response_line, _read_headers, get_header_tokens, validate_headers
 )
 from mitmproxy.test.tutils import treq, tresp
 
@@ -59,16 +59,23 @@ def test_read_response_head():
     assert r.content is None
 
 
+def test_validate_headers():
+    # both content-length and chunked (possible request smuggling)
+    with pytest.raises(ValueError, match="Received both a Transfer-Encoding and a Content-Length header"):
+        validate_headers(
+            Headers(transfer_encoding="chunked", content_length="42"),
+        )
+
+    with pytest.raises(ValueError, match="Received an invalid header name"):
+        validate_headers(
+            Headers([(b"content-length ", b"42")]),
+        )
+
+
 def test_expected_http_body_size():
     # Expect: 100-continue
     assert expected_http_body_size(
         treq(headers=Headers(expect="100-continue", content_length="42")),
-        expect_continue_as_0=True
-    ) == 0
-    # Expect: 100-continue
-    assert expected_http_body_size(
-        treq(headers=Headers(expect="100-continue", content_length="42")),
-        expect_continue_as_0=False
     ) == 42
 
     # http://tools.ietf.org/html/rfc7230#section-3.3
@@ -77,7 +84,7 @@ def test_expected_http_body_size():
         tresp(headers=Headers(content_length="42"))
     ) == 0
     assert expected_http_body_size(
-        treq(method=b"CONNECT"),
+        treq(method=b"CONNECT", headers=Headers()),
         None,
     ) == 0
     assert expected_http_body_size(
@@ -94,6 +101,30 @@ def test_expected_http_body_size():
     assert expected_http_body_size(
         treq(headers=Headers(transfer_encoding="chunked")),
     ) is None
+    assert expected_http_body_size(
+        treq(headers=Headers(transfer_encoding="gzip,\tchunked")),
+    ) is None
+    with pytest.raises(ValueError, match="Invalid transfer encoding"):
+        expected_http_body_size(
+            treq(headers=Headers(transfer_encoding="chun\u212Aed")),  # "chunKed".lower() == "chunked"
+        )
+    with pytest.raises(ValueError, match="Unknown transfer encoding"):
+        expected_http_body_size(
+            treq(headers=Headers(transfer_encoding="chun ked")),  # "chunKed".lower() == "chunked"
+        )
+    with pytest.raises(ValueError, match="Unknown transfer encoding"):
+        expected_http_body_size(
+            treq(headers=Headers(transfer_encoding="qux")),
+        )
+    # transfer-encoding: gzip
+    with pytest.raises(ValueError, match="Invalid request transfer encoding"):
+        expected_http_body_size(
+            treq(headers=Headers(transfer_encoding="gzip")),
+        )
+    assert expected_http_body_size(
+        treq(),
+        tresp(headers=Headers(transfer_encoding="gzip")),
+    ) == -1
 
     # explicit length
     for val in (b"foo", b"-7"):
@@ -104,16 +135,25 @@ def test_expected_http_body_size():
     assert expected_http_body_size(
         treq(headers=Headers(content_length="42"))
     ) == 42
-
-    # more than 1 content-length headers with same value
+    # multiple content-length headers with same value
     assert expected_http_body_size(
         treq(headers=Headers([(b'content-length', b'42'), (b'content-length', b'42')]))
     ) == 42
-
-    # more than 1 content-length headers with conflicting value
-    with pytest.raises(ValueError):
+    # multiple content-length headers with conflicting value
+    with pytest.raises(ValueError, match="Conflicting Content-Length headers"):
         expected_http_body_size(
             treq(headers=Headers([(b'content-length', b'42'), (b'content-length', b'45')]))
+        )
+
+    # non-int content-length
+    with pytest.raises(ValueError, match="Invalid Content-Length header"):
+        expected_http_body_size(
+            treq(headers=Headers([(b'content-length', b'NaN')]))
+        )
+    # negative content-length
+    with pytest.raises(ValueError, match="Negative Content-Length header"):
+        expected_http_body_size(
+            treq(headers=Headers([(b'content-length', b'-1')]))
         )
 
     # no length

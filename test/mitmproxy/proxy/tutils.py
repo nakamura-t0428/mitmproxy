@@ -2,6 +2,7 @@ import collections.abc
 import difflib
 import itertools
 import re
+import textwrap
 import traceback
 import typing
 
@@ -65,6 +66,7 @@ def _fmt_entry(x: PlaybookEntry):
     x = str(x)
     x = re.sub('Placeholder:None', '<unset placeholder>', x, flags=re.IGNORECASE)
     x = re.sub('Placeholder:', '', x, flags=re.IGNORECASE)
+    x = textwrap.indent(x, "     ")[5:]
     return f"{arrow} {x}"
 
 
@@ -193,13 +195,19 @@ class Playbook:
                         setattr(x, name, value())
                 if isinstance(x, events.OpenConnectionCompleted) and not x.reply:
                     x.command.connection.state = ConnectionState.OPEN
+                    x.command.connection.timestamp_start = 1624544785
                 elif isinstance(x, events.ConnectionClosed):
                     x.connection.state &= ~ConnectionState.CAN_READ
+                    x.connection.timestamp_end = 1624544787
 
                 self.actual.append(x)
+                cmds: typing.List[commands.Command] = []
                 try:
-                    cmds: typing.List[commands.Command] = list(self.layer.handle_event(x))
+                    # consume them one by one so that we can extend the log with all commands until traceback.
+                    for cmd in self.layer.handle_event(x):
+                        cmds.append(cmd)
                 except Exception:
+                    self.actual.extend(cmds)
                     self.actual.append(_TracebackInPlaybook(traceback.format_exc()))
                     break
 

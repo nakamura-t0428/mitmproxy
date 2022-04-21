@@ -1,12 +1,13 @@
+import asyncio
 import email
 import time
+import json
 from unittest import mock
 
 import pytest
 
 from mitmproxy import flow
 from mitmproxy import flowfilter
-from mitmproxy.exceptions import ControlException
 from mitmproxy.http import Headers, Request, Response, HTTPFlow
 from mitmproxy.net.http.cookies import CookieAttrs
 from mitmproxy.test.tflow import tflow
@@ -429,9 +430,9 @@ class TestRequestUtils:
 
     def test_set_multipart_form(self):
         request = treq()
-        request.multipart_form = [("file", "shell.jpg"), ("file_size", "1000")]
-        assert request.headers["Content-Type"] == 'multipart/form-data'
-        assert request.content is None
+        request.multipart_form = [(b"file", b"shell.jpg"), (b"file_size", b"1000")]
+        assert request.headers["Content-Type"].startswith('multipart/form-data')
+        assert list(request.multipart_form.items()) == [(b"file", b"shell.jpg"), (b"file_size", b"1000")]
 
 
 class TestResponse:
@@ -612,6 +613,11 @@ class TestResponseUtils:
             m.side_effect = ValueError
             r.refresh(n)
 
+        # Test negative unixtime, which raises on at least Windows.
+        r.headers["date"] = pre = "Mon, 01 Jan 1601 00:00:00 GMT"
+        r.refresh(946681202)
+        assert r.headers["date"] == pre
+
 
 class TestHTTPFlow:
 
@@ -698,10 +704,11 @@ class TestHTTPFlow:
 
     def test_kill(self):
         f = tflow()
-        with pytest.raises(ControlException):
-            f.intercept()
-            f.resume()
-            f.kill()
+        f.intercept()
+        f.resume()
+        assert f.killable
+        f.kill()
+        assert not f.killable
 
         f = tflow()
         f.intercept()
@@ -713,16 +720,45 @@ class TestHTTPFlow:
     def test_intercept(self):
         f = tflow()
         f.intercept()
-        assert f.reply.state == "taken"
+        assert f.intercepted
         f.intercept()
-        assert f.reply.state == "taken"
+        assert f.intercepted
 
     def test_resume(self):
         f = tflow()
-        f.intercept()
-        assert f.reply.state == "taken"
         f.resume()
-        assert f.reply.state == "committed"
+        assert not f.intercepted
+        f.intercept()
+        assert f.intercepted
+        f.resume()
+        assert not f.intercepted
+
+    async def test_wait_for_resume(self):
+        f = tflow()
+        await f.wait_for_resume()
+
+        f = tflow()
+        f.intercept()
+        f.resume()
+        await f.wait_for_resume()
+
+        f = tflow()
+        f.intercept()
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(f.wait_for_resume(), 0.2)
+        f.resume()
+        await f.wait_for_resume()
+
+        f = tflow()
+        f.intercept()
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(f.wait_for_resume(), 0.2)
+        f.resume()
+        f.intercept()
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(f.wait_for_resume(), 0.2)
+        f.resume()
+        await f.wait_for_resume()
 
     def test_resume_duplicated(self):
         f = tflow()
@@ -915,6 +951,13 @@ class TestMessage:
         assert resp.data.content == b"bar"
         assert resp.headers["content-length"] == "0"
 
+    def test_content_length_not_added_for_response_with_transfer_encoding(self):
+        headers = Headers(((b"transfer-encoding", b"chunked"),))
+        resp = tresp(headers=headers)
+        resp.content = b"bar"
+
+        assert "content-length" not in resp.headers
+
     def test_headers(self):
         _test_passthrough_attr(tresp(), "headers")
 
@@ -1055,6 +1098,7 @@ class TestMessageText:
     def test_guess_meta_charset(self):
         r = tresp(content=b'<meta http-equiv="content-type" '
                           b'content="text/html;charset=gb2312">\xe6\x98\x8e\xe4\xbc\xaf')
+        r.headers["content-type"] = "text/html"
         # "鏄庝集" is decoded form of \xe6\x98\x8e\xe4\xbc\xaf in gb18030
         assert "鏄庝集" in r.text
 
@@ -1144,3 +1188,23 @@ class TestMessageText:
         r.text = '\udcff'
         assert r.headers["content-type"] == "text/html; charset=utf-8"
         assert r.raw_content == b"\xFF"
+
+    def test_get_json(self):
+        req = treq(content=None)
+        with pytest.raises(TypeError):
+            req.json()
+
+        req = treq(content=b'')
+        with pytest.raises(json.decoder.JSONDecodeError):
+            req.json()
+
+        req = treq(content=b'{}')
+        assert req.json() == {}
+
+        req = treq(content=b'{"a": 1}')
+        assert req.json() == {"a": 1}
+
+        req = treq(content=b'{')
+
+        with pytest.raises(json.decoder.JSONDecodeError):
+            req.json()

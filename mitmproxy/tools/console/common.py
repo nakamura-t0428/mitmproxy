@@ -10,11 +10,11 @@ import urwid.util
 
 from mitmproxy import flow
 from mitmproxy.http import HTTPFlow
-from mitmproxy.utils import human
+from mitmproxy.utils import human, emoji
 from mitmproxy.tcp import TCPFlow
 
 # Detect Windows Subsystem for Linux and Windows
-IS_WINDOWS = "Microsoft" in platform.platform() or "Windows" in platform.platform()
+IS_WINDOWS_OR_WSL = "Microsoft" in platform.platform() or "Windows" in platform.platform()
 
 
 def is_keypress(k):
@@ -161,6 +161,16 @@ def fixlen_r(s: str, maxlen: int) -> str:
         return SYMBOL_ELLIPSIS + s[len(s) - maxlen + len(SYMBOL_ELLIPSIS):]
 
 
+def render_marker(marker: str) -> str:
+    rendered = emoji.emoji.get(marker, SYMBOL_MARK)
+
+    # The marker can only be one glyph. Some emoji that use zero-width joiners (ZWJ)
+    # will not be rendered as a single glyph and instead will show
+    # multiple glyphs. Just use the first glyph as a fallback.
+    # https://emojipedia.org/emoji-zwj-sequence/
+    return rendered[0]
+
+
 class TruncatedText(urwid.Widget):
     def __init__(self, text, attr, align='left'):
         self.text = text
@@ -181,7 +191,7 @@ class TruncatedText(urwid.Widget):
             text = text[::-1]
             attr = attr[::-1]
 
-        text_len = len(text)  # TODO: unicode?
+        text_len = urwid.util.calc_width(text, 0, len(text))
         if size is not None and len(size) > 0:
             width = size[0]
         else:
@@ -196,8 +206,10 @@ class TruncatedText(urwid.Widget):
                 c_text = text
                 c_attr = attr
         else:
-            visible_len = width - len(SYMBOL_ELLIPSIS)
-            visible_text = text[0:visible_len]
+            trim = urwid.util.calc_trim_text(text, 0, width - 1, 0, width - 1)
+            visible_text = text[0:trim[1]]
+            if trim[3] == 1:
+                visible_text += ' '
             c_text = visible_text + SYMBOL_ELLIPSIS
             c_attr = (urwid.util.rle_subseg(attr, 0, len(visible_text.encode())) +
                       [('focus', len(SYMBOL_ELLIPSIS.encode()))])
@@ -359,18 +371,18 @@ def format_left_indicators(
 def format_right_indicators(
         *,
         replay: bool,
-        marked: bool
+        marked: str,
 ):
     indicators: typing.List[typing.Union[str, typing.Tuple[str, str]]] = []
     if replay:
         indicators.append(("replay", SYMBOL_REPLAY))
     else:
         indicators.append(" ")
-    if marked:
-        indicators.append(("mark", SYMBOL_MARK))
+    if bool(marked):
+        indicators.append(("mark", render_marker(marked)))
     else:
-        indicators.append(" ")
-    return "fixed", 2, urwid.Text(indicators)
+        indicators.append("  ")
+    return "fixed", 3, urwid.Text(indicators)
 
 
 @lru_cache(maxsize=800)
@@ -378,7 +390,7 @@ def format_http_flow_list(
         *,
         render_mode: RenderMode,
         focused: bool,
-        marked: bool,
+        marked: str,
         is_replay: bool,
         request_method: str,
         request_scheme: str,
@@ -479,7 +491,7 @@ def format_http_flow_table(
         *,
         render_mode: RenderMode,
         focused: bool,
-        marked: bool,
+        marked: str,
         is_replay: typing.Optional[str],
         request_method: str,
         request_scheme: str,
@@ -574,7 +586,7 @@ def format_http_flow_table(
 
     items.append(format_right_indicators(
         replay=bool(is_replay),
-        marked=marked
+        marked=marked,
     ))
     return urwid.Columns(items, dividechars=1, min_width=15)
 
@@ -585,7 +597,7 @@ def format_tcp_flow(
         render_mode: RenderMode,
         focused: bool,
         timestamp_start: float,
-        marked: bool,
+        marked: str,
         client_address,
         server_address,
         total_size: int,
@@ -659,13 +671,13 @@ def format_flow(
         for message in f.messages:
             total_size += len(message.content)
         if f.messages:
-            duration = f.messages[-1].timestamp - f.timestamp_start
+            duration = f.messages[-1].timestamp - f.client_conn.timestamp_start
         else:
             duration = None
         return format_tcp_flow(
             render_mode=render_mode,
             focused=focused,
-            timestamp_start=f.timestamp_start,
+            timestamp_start=f.client_conn.timestamp_start,
             marked=f.marked,
             client_address=f.client_conn.peername,
             server_address=f.server_conn.address,
@@ -674,9 +686,7 @@ def format_flow(
             error_message=error_message,
         )
     elif isinstance(f, HTTPFlow):
-        intercepted = (
-                f.intercepted and not (f.reply and f.reply.state == "committed")
-        )
+        intercepted = f.intercepted
         response_content_length: typing.Optional[int]
         if f.response:
             if f.response.raw_content is not None:

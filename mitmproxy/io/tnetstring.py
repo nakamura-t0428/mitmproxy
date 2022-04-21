@@ -58,7 +58,7 @@ def dumps(value: TSerializable) -> bytes:
     return b''.join(q)
 
 
-def dump(value: TSerializable, file_handle: typing.BinaryIO) -> None:
+def dump(value: TSerializable, file_handle: typing.IO[bytes]) -> None:
     """
     This function dumps a python object as a tnetstring and
     writes it to the given file.
@@ -146,7 +146,7 @@ def _rdumpq(q: collections.deque, size: int, value: TSerializable) -> int:
         write(span)
         return size + 1 + len(span)
     else:
-        raise ValueError("unserializable object: {} ({})".format(value, type(value)))
+        raise ValueError(f"unserializable object: {value} ({type(value)})")
 
 
 def loads(string: bytes) -> TSerializable:
@@ -156,7 +156,7 @@ def loads(string: bytes) -> TSerializable:
     return pop(string)[0]
 
 
-def load(file_handle: typing.BinaryIO) -> TSerializable:
+def load(file_handle: typing.IO[bytes]) -> TSerializable:
     """load(file) -> object
 
     This function reads a tnetstring from a file and parses it into a
@@ -171,7 +171,7 @@ def load(file_handle: typing.BinaryIO) -> TSerializable:
     data_length = b""
     while c.isdigit():
         data_length += c
-        if len(data_length) > 9:
+        if len(data_length) > 12:
             raise ValueError("not a tnetstring: absurdly large length prefix")
         c = file_handle.read(1)
     if c != b":":

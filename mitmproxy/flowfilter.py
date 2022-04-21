@@ -15,7 +15,8 @@
                         application/javascript
                         text/css
                         image/*
-                        application/x-shockwave-flash
+                        font/*
+                        application/font-*
         ~h rex      Header line in either request or response
         ~hq rex     Header in request
         ~hs rex     Header in response
@@ -35,8 +36,7 @@
 import functools
 import re
 import sys
-from typing import Callable, ClassVar, Optional, Sequence, Type
-
+from typing import ClassVar, Sequence, Type, Protocol, Union
 import pyparsing as pp
 
 from mitmproxy import flow, http, tcp
@@ -87,7 +87,7 @@ class FMarked(_Action):
     help = "Match marked flows"
 
     def __call__(self, f):
-        return f.marked
+        return bool(f.marked)
 
 
 class FHTTP(_Action):
@@ -136,6 +136,14 @@ class FResp(_Action):
         return bool(f.response)
 
 
+class FAll(_Action):
+    code = "all"
+    help = "Match all flows"
+
+    def __call__(self, f: flow.Flow):
+        return True
+
+
 class _Rex(_Action):
     flags = 0
     is_binary = True
@@ -160,13 +168,15 @@ def _check_content_type(rex, message):
 
 class FAsset(_Action):
     code = "a"
-    help = "Match asset in response: CSS, JavaScript, images."
+    help = "Match asset in response: CSS, JavaScript, images, fonts."
     ASSET_TYPES = [re.compile(x) for x in [
         b"text/javascript",
         b"application/x-javascript",
         b"application/javascript",
         b"text/css",
-        b"image/.*"
+        b"image/.*",
+        b"font/.*",
+        b"application/font-.*",
     ]]
 
     @only(http.HTTPFlow)
@@ -366,7 +376,7 @@ class FSrc(_Rex):
     def __call__(self, f):
         if not f.client_conn or not f.client_conn.peername:
             return False
-        r = "{}:{}".format(f.client_conn.peername[0], f.client_conn.peername[1])
+        r = f"{f.client_conn.peername[0]}:{f.client_conn.peername[1]}"
         return f.client_conn.peername and self.re.search(r)
 
 
@@ -378,8 +388,62 @@ class FDst(_Rex):
     def __call__(self, f):
         if not f.server_conn or not f.server_conn.address:
             return False
-        r = "{}:{}".format(f.server_conn.address[0], f.server_conn.address[1])
+        r = f"{f.server_conn.address[0]}:{f.server_conn.address[1]}"
         return f.server_conn.address and self.re.search(r)
+
+
+class FReplay(_Action):
+    code = "replay"
+    help = "Match replayed flows"
+
+    def __call__(self, f):
+        return f.is_replay is not None
+
+
+class FReplayClient(_Action):
+    code = "replayq"
+    help = "Match replayed client request"
+
+    def __call__(self, f):
+        return f.is_replay == 'request'
+
+
+class FReplayServer(_Action):
+    code = "replays"
+    help = "Match replayed server response"
+
+    def __call__(self, f):
+        return f.is_replay == 'response'
+
+
+class FMeta(_Rex):
+    code = "meta"
+    help = "Flow metadata"
+    flags = re.MULTILINE
+    is_binary = False
+
+    def __call__(self, f):
+        m = "\n".join([f"{key}: {value}" for key, value in f.metadata.items()])
+        return self.re.search(m)
+
+
+class FMarker(_Rex):
+    code = "marker"
+    help = "Match marked flows with specified marker"
+    is_binary = False
+
+    def __call__(self, f):
+        return self.re.search(f.marked)
+
+
+class FComment(_Rex):
+    code = "comment"
+    help = "Flow comment"
+    flags = re.MULTILINE
+    is_binary = False
+
+    def __call__(self, f):
+        return self.re.search(f.comment)
 
 
 class _Int(_Action):
@@ -444,10 +508,14 @@ filter_unary: Sequence[Type[_Action]] = [
     FErr,
     FHTTP,
     FMarked,
+    FReplay,
+    FReplayClient,
+    FReplayServer,
     FReq,
     FResp,
     FTCP,
     FWebSocket,
+    FAll,
 ]
 filter_rex: Sequence[Type[_Rex]] = [
     FBod,
@@ -464,6 +532,9 @@ filter_rex: Sequence[Type[_Rex]] = [
     FMethod,
     FSrc,
     FUrl,
+    FMeta,
+    FMarker,
+    FComment,
 ]
 filter_int = [
     FCode
@@ -524,21 +595,31 @@ def _make():
 
 
 bnf = _make()
-TFilter = Callable[[flow.Flow], bool]
 
 
-def parse(s: str) -> Optional[TFilter]:
+class TFilter(Protocol):
+    pattern: str
+
+    def __call__(self, f: flow.Flow) -> bool:
+        ...  # pragma: no cover
+
+
+def parse(s: str) -> TFilter:
+    """
+    Parse a filter expression and return the compiled filter function.
+    If the filter syntax is invalid, `ValueError` is raised.
+    """
+    if not s:
+        raise ValueError("Empty filter expression")
     try:
         flt = bnf.parseString(s, parseAll=True)[0]
         flt.pattern = s
         return flt
-    except pp.ParseException:
-        return None
-    except ValueError:
-        return None
+    except (pp.ParseException, ValueError) as e:
+        raise ValueError(f"Invalid filter expression: {s!r}") from e
 
 
-def match(flt, flow):
+def match(flt: Union[str, TFilter], flow: flow.Flow) -> bool:
     """
         Matches a flow against a compiled filter expression.
         Returns True if matched, False if not.
@@ -548,11 +629,13 @@ def match(flt, flow):
     """
     if isinstance(flt, str):
         flt = parse(flt)
-        if not flt:
-            raise ValueError("Invalid filter expression.")
     if flt:
         return flt(flow)
     return True
+
+
+match_all: TFilter = parse("~all")
+"""A filter function that matches all flows"""
 
 
 help = []

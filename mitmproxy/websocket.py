@@ -6,6 +6,7 @@ as HTTP flows as well. They can be distinguished from regular HTTP requests by h
 This module only defines the classes for individual `WebSocketMessage`s and the `WebSocketData` container.
 """
 import time
+import warnings
 from typing import List, Tuple, Union
 from typing import Optional
 
@@ -13,25 +14,23 @@ from mitmproxy import stateobject
 from mitmproxy.coretypes import serializable
 from wsproto.frame_protocol import Opcode
 
-WebSocketMessageState = Tuple[int, bool, bytes, float, bool]
+WebSocketMessageState = Tuple[int, bool, bytes, float, bool, bool]
 
 
 class WebSocketMessage(serializable.Serializable):
     """
     A single WebSocket message sent from one peer to the other.
 
-    Fragmented WebSocket messages are reassembled by mitmproxy and the
+    Fragmented WebSocket messages are reassembled by mitmproxy and then
     represented as a single instance of this class.
 
     The [WebSocket RFC](https://tools.ietf.org/html/rfc6455) specifies both
     text and binary messages. To avoid a whole class of nasty type confusion bugs,
-    mitmproxy stores all message contents as binary. If you need text, you can decode the `content` property:
+    mitmproxy stores all message contents as `bytes`. If you need a `str`, you can access the `text` property
+    on text messages:
 
-    >>> from wsproto.frame_protocol import Opcode
-    >>> if message.type == Opcode.TEXT:
-    >>>     text = message.content.decode()
-
-    Per the WebSocket spec, text messages always use UTF-8 encoding.
+    >>> if message.is_text:
+    >>>     text = message.text
     """
 
     from_client: bool
@@ -40,15 +39,16 @@ class WebSocketMessage(serializable.Serializable):
     """
     The message type, as per RFC 6455's [opcode](https://tools.ietf.org/html/rfc6455#section-5.2).
 
-    Note that mitmproxy will always store the message contents as *bytes*.
-    A dedicated `.text` property for text messages is planned, see https://github.com/mitmproxy/mitmproxy/pull/4486.
+    Mitmproxy currently only exposes messages assembled from `TEXT` and `BINARY` frames.
     """
     content: bytes
     """A byte-string representing the content of this message."""
     timestamp: float
     """Timestamp of when this message was received or created."""
-    killed: bool
+    dropped: bool
     """True if the message has not been forwarded by mitmproxy, False otherwise."""
+    injected: bool
+    """True if the message was injected and did not originate from a client/server, False otherwise"""
 
     def __init__(
         self,
@@ -56,23 +56,25 @@ class WebSocketMessage(serializable.Serializable):
         from_client: bool,
         content: bytes,
         timestamp: Optional[float] = None,
-        killed: bool = False,
+        dropped: bool = False,
+        injected: bool = False,
     ) -> None:
         self.from_client = from_client
         self.type = Opcode(type)
         self.content = content
         self.timestamp: float = timestamp or time.time()
-        self.killed = killed
+        self.dropped = dropped
+        self.injected = injected
 
     @classmethod
     def from_state(cls, state: WebSocketMessageState):
         return cls(*state)
 
     def get_state(self) -> WebSocketMessageState:
-        return int(self.type), self.from_client, self.content, self.timestamp, self.killed
+        return int(self.type), self.from_client, self.content, self.timestamp, self.dropped, self.injected
 
     def set_state(self, state: WebSocketMessageState) -> None:
-        typ, self.from_client, self.content, self.timestamp, self.killed = state
+        typ, self.from_client, self.content, self.timestamp, self.dropped, self.injected = state
         self.type = Opcode(typ)
 
     def __repr__(self):
@@ -81,9 +83,43 @@ class WebSocketMessage(serializable.Serializable):
         else:
             return repr(self.content)
 
-    def kill(self):
-        # Likely to be replaced with .drop() in the future, see https://github.com/mitmproxy/mitmproxy/pull/4486
-        self.killed = True
+    @property
+    def is_text(self) -> bool:
+        """
+        `True` if this message is assembled from WebSocket `TEXT` frames,
+        `False` if it is assembled from `BINARY` frames.
+        """
+        return self.type == Opcode.TEXT
+
+    def drop(self):
+        """Drop this message, i.e. don't forward it to the other peer."""
+        self.dropped = True
+
+    def kill(self):  # pragma: no cover
+        """A deprecated alias for `.drop()`."""
+        warnings.warn("WebSocketMessage.kill() is deprecated, use .drop() instead.", DeprecationWarning, stacklevel=2)
+        self.drop()
+
+    @property
+    def text(self) -> str:
+        """
+        The message content as text.
+
+        This attribute is only available if `WebSocketMessage.is_text` is `True`.
+
+        *See also:* `WebSocketMessage.content`
+        """
+        if self.type != Opcode.TEXT:
+            raise AttributeError(f"{self.type.name.title()} WebSocket frames do not have a 'text' attribute.")
+
+        return self.content.decode()
+
+    @text.setter
+    def text(self, value: str) -> None:
+        if self.type != Opcode.TEXT:
+            raise AttributeError(f"{self.type.name.title()} WebSocket frames do not have a 'text' attribute.")
+
+        self.content = value.encode()
 
 
 class WebSocketData(stateobject.StateObject):
@@ -97,9 +133,9 @@ class WebSocketData(stateobject.StateObject):
 
     closed_by_client: Optional[bool] = None
     """
-    True if the client closed the connection,
-    False if the server closed the connection,
-    None if the connection is active.
+    `True` if the client closed the connection,
+    `False` if the server closed the connection,
+    `None` if the connection is active.
     """
     close_code: Optional[int] = None
     """[Close Code](https://tools.ietf.org/html/rfc6455#section-7.1.5)"""

@@ -5,7 +5,6 @@ import urllib.parse
 import asgiref.compatibility
 import asgiref.wsgi
 from mitmproxy import ctx, http
-from mitmproxy.controller import DummyReply
 
 
 class ASGIApp:
@@ -26,18 +25,14 @@ class ASGIApp:
         return f"asgiapp:{self.host}:{self.port}"
 
     def should_serve(self, flow: http.HTTPFlow) -> bool:
-        assert flow.reply
         return bool(
             (flow.request.pretty_host, flow.request.port) == (self.host, self.port)
-            and flow.reply.state == "start" and not flow.error and not flow.response
-            and not isinstance(flow.reply, DummyReply)  # ignore the HTTP flows of this app loaded from somewhere
+            and flow.live and not flow.error and not flow.response
         )
 
-    def request(self, flow: http.HTTPFlow) -> None:
-        assert flow.reply
+    async def request(self, flow: http.HTTPFlow) -> None:
         if self.should_serve(flow):
-            flow.reply.take()  # pause hook completion
-            asyncio.ensure_future(serve(self.asgi_app, flow))
+            await serve(self.asgi_app, flow)
 
 
 class WSGIApp(ASGIApp):
@@ -76,11 +71,11 @@ def make_scope(flow: http.HTTPFlow) -> dict:
         },
         "http_version": HTTP_VERSION_MAP.get(flow.request.http_version, "1.1"),
         "method": flow.request.method,
-        "scheme": flow.request.scheme,
+        "scheme": flow.request.scheme.upper(),
         "path": path,
         "raw_path": flow.request.path,
         "query_string": query_string,
-        "headers": list(list(x) for x in flow.request.headers.fields),
+        "headers": [(name.lower(), value) for (name, value) in flow.request.headers.fields],
         "client": flow.client_conn.peername,
         "extensions": {
             "mitmproxy.master": ctx.master,
@@ -92,7 +87,6 @@ async def serve(app, flow: http.HTTPFlow):
     """
     Serves app on flow.
     """
-    assert flow.reply
 
     scope = make_scope(flow)
     done = asyncio.Event()
@@ -135,5 +129,4 @@ async def serve(app, flow: http.HTTPFlow):
         ctx.log.error(f"Error in asgi app:\n{traceback.format_exc(limit=-5)}")
         flow.response = http.Response.make(500, b"ASGI Error.")
     finally:
-        flow.reply.commit()
         done.set()

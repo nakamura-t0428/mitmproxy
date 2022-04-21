@@ -4,24 +4,26 @@ import mimetypes
 import os
 import os.path
 import shlex
-import signal
+import shutil
 import stat
 import subprocess
 import sys
 import tempfile
-import typing  # noqa
 import contextlib
 import threading
+
+from tornado.platform.asyncio import AddThreadSelectorEventLoop
 
 import urwid
 
 from mitmproxy import addons
 from mitmproxy import master
 from mitmproxy import log
-from mitmproxy.addons import intercept
+from mitmproxy.addons import errorcheck, intercept
 from mitmproxy.addons import eventstore
 from mitmproxy.addons import readfile
 from mitmproxy.addons import view
+from mitmproxy.contrib.tornado import patch_tornado
 from mitmproxy.tools.console import consoleaddons
 from mitmproxy.tools.console import defaultkeys
 from mitmproxy.tools.console import keymap
@@ -34,8 +36,6 @@ class ConsoleMaster(master.Master):
 
     def __init__(self, opts):
         super().__init__(opts)
-
-        self.start_err: typing.Optional[log.LogEntry] = None
 
         self.view: view.View = view.View()
         self.events = eventstore.EventStore()
@@ -56,12 +56,8 @@ class ConsoleMaster(master.Master):
             readfile.ReadFile(),
             consoleaddons.ConsoleAddon(self),
             keymap.KeymapConfig(),
+            errorcheck.ErrorCheck(log_to_stderr=True),
         )
-
-        def sigint_handler(*args, **kwargs):
-            self.prompt_for_exit()
-
-        signal.signal(signal.SIGINT, sigint_handler)
 
         self.window = None
 
@@ -93,7 +89,7 @@ class ConsoleMaster(master.Master):
             signals.status_message.send(
                 message = (
                     entry.level,
-                    "{}: {}".format(entry.level.title(), str(entry.msg).lstrip())
+                    f"{entry.level.title()}: {str(entry.msg).lstrip()}"
                 ),
                 expire=5
             )
@@ -113,13 +109,26 @@ class ConsoleMaster(master.Master):
             self.loop.screen_size = None
             self.loop.draw_screen()
 
+    def get_editor(self) -> str:
+        # based upon https://github.com/pallets/click/blob/main/src/click/_termui_impl.py
+        if m := os.environ.get("MITMPROXY_EDITOR"):
+            return m
+        if m := os.environ.get("EDITOR"):
+            return m
+        for editor in "sensible-editor", "nano", "vim":
+            if shutil.which(editor):
+                return editor
+        if os.name == "nt":
+            return "notepad"
+        else:
+            return "vi"
+
     def spawn_editor(self, data):
         text = not isinstance(data, bytes)
-        fd, name = tempfile.mkstemp('', "mproxy", text=text)
+        fd, name = tempfile.mkstemp('', "mitmproxy", text=text)
         with open(fd, "w" if text else "wb") as f:
             f.write(data)
-        # if no EDITOR is set, assume 'vi'
-        c = os.environ.get("MITMPROXY_EDITOR") or os.environ.get("EDITOR") or "vi"
+        c = self.get_editor()
         cmd = shlex.split(c)
         cmd.append(name)
         with self.uistopped():
@@ -185,11 +194,21 @@ class ConsoleMaster(master.Master):
     def inject_key(self, key):
         self.loop.process_input([key])
 
-    def run(self):
+    async def running(self) -> None:
         if not sys.stdout.isatty():
             print("Error: mitmproxy's console interface requires a tty. "
                   "Please run mitmproxy in an interactive shell environment.", file=sys.stderr)
             sys.exit(1)
+
+        if os.name != "nt" and "utf" not in urwid.detected_encoding.lower():
+            print(
+                f"mitmproxy expects a UTF-8 console environment, not {urwid.detected_encoding!r}. "
+                f"Set your LANG environment variable to something like en_US.UTF-8.",
+                file=sys.stderr
+            )
+            # Experimental (04/2022): We just don't exit here and see if/how that affects users.
+            # sys.exit(1)
+        urwid.set_encoding("utf8")
 
         signals.call_in.connect(self.sig_call_in)
         self.ui = window.Screen()
@@ -199,23 +218,29 @@ class ConsoleMaster(master.Master):
             self.set_palette,
             ["console_palette", "console_palette_transparent"]
         )
+
+        loop = asyncio.get_running_loop()
+        if isinstance(loop, getattr(asyncio, "ProactorEventLoop", tuple())):
+            patch_tornado()
+            # fix for https://bugs.python.org/issue37373
+            loop = AddThreadSelectorEventLoop(loop)  # type: ignore
         self.loop = urwid.MainLoop(
             urwid.SolidFill("x"),
-            event_loop=urwid.AsyncioEventLoop(loop=asyncio.get_event_loop()),
-            screen = self.ui,
-            handle_mouse = self.options.console_mouse,
+            event_loop=urwid.AsyncioEventLoop(loop=loop),
+            screen=self.ui,
+            handle_mouse=self.options.console_mouse,
         )
         self.window = window.Window(self)
         self.loop.widget = self.window
         self.window.refresh()
 
-        if self.start_err:
-            def display_err(*_):
-                self.sig_add_log(None, self.start_err)
-                self.start_err = None
-            self.loop.set_alarm_in(0.01, display_err)
+        self.loop.start()
 
-        super().run_loop(self.loop.run)
+        await super().running()
+
+    async def done(self):
+        self.loop.stop()
+        await super().done()
 
     def overlay(self, widget, **kwargs):
         self.window.set_overlay(widget, **kwargs)

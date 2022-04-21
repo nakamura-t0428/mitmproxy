@@ -16,7 +16,7 @@ class TestStickyCookie:
     def test_config(self):
         sc = stickycookie.StickyCookie()
         with taddons.context(sc) as tctx:
-            with pytest.raises(Exception, match="invalid filter"):
+            with pytest.raises(Exception, match="Invalid filter expression"):
                 tctx.configure(sc, stickycookie="~b")
 
             tctx.configure(sc, stickycookie="foo")
@@ -32,7 +32,6 @@ class TestStickyCookie:
             f.response.headers["set-cookie"] = "foo=bar"
             sc.request(f)
 
-            f.reply.acked = False
             sc.response(f)
 
             assert sc.jar

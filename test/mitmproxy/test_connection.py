@@ -1,3 +1,5 @@
+import pytest
+
 from mitmproxy.connection import Server, Client, ConnectionState
 from mitmproxy.test.tflow import tclient_conn, tserver_conn
 
@@ -76,3 +78,12 @@ class TestServer:
         assert c2.get_state() != c.get_state()
         c.id = c2.id = "foo"
         assert c2.get_state() == c.get_state()
+
+    def test_address(self):
+        s = Server(("address", 22))
+        s.address = ("example.com", 443)
+        s.state = ConnectionState.OPEN
+        with pytest.raises(RuntimeError):
+            s.address = ("example.com", 80)
+        # No-op assignment, allowed because it might be triggered by a Server.set_state() call.
+        s.address = ("example.com", 443)

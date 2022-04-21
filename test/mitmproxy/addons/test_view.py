@@ -8,12 +8,13 @@ from mitmproxy import exceptions
 from mitmproxy import io
 from mitmproxy.test import taddons
 from mitmproxy.tools.console import consoleaddons
+from mitmproxy.tools.console.common import render_marker, SYMBOL_MARK
 
 
 def tft(*, method="get", start=0):
     f = tflow.tflow()
     f.request.method = method
-    f.request.timestamp_start = start
+    f.timestamp_created = start
     return f
 
 
@@ -30,7 +31,7 @@ def test_order_refresh():
     with taddons.context() as tctx:
         tctx.configure(v, view_order="time")
         v.add([tf])
-        tf.request.timestamp_start = 10
+        tf.timestamp_created = 10
         assert not sargs
         v.update([tf])
         assert sargs
@@ -74,7 +75,7 @@ def test_simple():
     v = view.View()
     f = tft(start=1)
     assert v.store_count() == 0
-    v.request(f)
+    v.requestheaders(f)
     assert list(v) == [f]
     assert v.get_by_id(f.id)
     assert not v.get_by_id("nonexistent")
@@ -87,15 +88,15 @@ def test_simple():
     v.kill(f)
     assert list(v) == [f]
 
-    v.request(f)
+    v.requestheaders(f)
     assert list(v) == [f]
     assert len(v._store) == 1
     assert v.store_count() == 1
 
     f2 = tft(start=3)
-    v.request(f2)
+    v.requestheaders(f2)
     assert list(v) == [f, f2]
-    v.request(f2)
+    v.requestheaders(f2)
     assert list(v) == [f, f2]
     assert len(v._store) == 2
 
@@ -104,9 +105,9 @@ def test_simple():
     assert not v.inbounds(100)
 
     f3 = tft(start=2)
-    v.request(f3)
+    v.requestheaders(f3)
     assert list(v) == [f, f3, f2]
-    v.request(f3)
+    v.requestheaders(f3)
     assert list(v) == [f, f3, f2]
     assert len(v._store) == 3
 
@@ -139,10 +140,10 @@ def test_simple_tcp():
 
 def test_filter():
     v = view.View()
-    v.request(tft(method="get"))
-    v.request(tft(method="put"))
-    v.request(tft(method="get"))
-    v.request(tft(method="put"))
+    v.requestheaders(tft(method="get"))
+    v.requestheaders(tft(method="put"))
+    v.requestheaders(tft(method="get"))
+    v.requestheaders(tft(method="put"))
     assert(len(v)) == 4
     v.set_filter_cmd("~m get")
     assert [i.request.method for i in v] == ["GET", "GET"]
@@ -193,7 +194,6 @@ def test_orders():
         assert v.order_options()
 
 
-@pytest.mark.asyncio
 async def test_load(tmpdir):
     path = str(tmpdir.join("path"))
     v = view.View()
@@ -223,30 +223,34 @@ async def test_load(tmpdir):
 def test_resolve():
     v = view.View()
     with taddons.context() as tctx:
+        f = tft(method="get")
         assert tctx.command(v.resolve, "@all") == []
         assert tctx.command(v.resolve, "@focus") == []
         assert tctx.command(v.resolve, "@shown") == []
         assert tctx.command(v.resolve, "@hidden") == []
         assert tctx.command(v.resolve, "@marked") == []
         assert tctx.command(v.resolve, "@unmarked") == []
+        assert tctx.command(v.resolve, f"@{f.id}") == []
         assert tctx.command(v.resolve, "~m get") == []
-        v.request(tft(method="get"))
+        v.requestheaders(f)
         assert len(tctx.command(v.resolve, "~m get")) == 1
         assert len(tctx.command(v.resolve, "@focus")) == 1
         assert len(tctx.command(v.resolve, "@all")) == 1
         assert len(tctx.command(v.resolve, "@shown")) == 1
         assert len(tctx.command(v.resolve, "@unmarked")) == 1
+        assert len(tctx.command(v.resolve, f"@{f.id}")) == 1
         assert tctx.command(v.resolve, "@hidden") == []
         assert tctx.command(v.resolve, "@marked") == []
-        v.request(tft(method="put"))
+        v.requestheaders(tft(method="put"))
+        assert len(tctx.command(v.resolve, f"@{f.id}")) == 1
         assert len(tctx.command(v.resolve, "@focus")) == 1
         assert len(tctx.command(v.resolve, "@shown")) == 2
         assert len(tctx.command(v.resolve, "@all")) == 2
         assert tctx.command(v.resolve, "@hidden") == []
         assert tctx.command(v.resolve, "@marked") == []
 
-        v.request(tft(method="get"))
-        v.request(tft(method="put"))
+        v.requestheaders(tft(method="get"))
+        v.requestheaders(tft(method="put"))
 
         f = flowfilter.parse("~m get")
         v.set_filter(f)
@@ -263,7 +267,7 @@ def test_resolve():
         assert m(tctx.command(v.resolve, "@unmarked")) == ["PUT", "GET", "PUT"]
         assert m(tctx.command(v.resolve, "@all")) == ["GET", "PUT", "GET", "PUT"]
 
-        with pytest.raises(exceptions.CommandError, match="Invalid flow filter"):
+        with pytest.raises(exceptions.CommandError, match="Invalid filter expression"):
             tctx.command(v.resolve, "~")
 
 
@@ -337,11 +341,11 @@ def test_setgetval():
 
 def test_order():
     v = view.View()
-    v.request(tft(method="get", start=1))
-    v.request(tft(method="put", start=2))
-    v.request(tft(method="get", start=3))
-    v.request(tft(method="put", start=4))
-    assert [i.request.timestamp_start for i in v] == [1, 2, 3, 4]
+    v.requestheaders(tft(method="get", start=1))
+    v.requestheaders(tft(method="put", start=2))
+    v.requestheaders(tft(method="get", start=3))
+    v.requestheaders(tft(method="put", start=4))
+    assert [i.timestamp_created for i in v] == [1, 2, 3, 4]
 
     v.set_order("method")
     assert v.get_order() == "method"
@@ -351,24 +355,24 @@ def test_order():
 
     v.set_order("time")
     assert v.get_order() == "time"
-    assert [i.request.timestamp_start for i in v] == [4, 3, 2, 1]
+    assert [i.timestamp_created for i in v] == [4, 3, 2, 1]
 
     v.set_reversed(False)
-    assert [i.request.timestamp_start for i in v] == [1, 2, 3, 4]
+    assert [i.timestamp_created for i in v] == [1, 2, 3, 4]
     with pytest.raises(exceptions.CommandError):
         v.set_order("not_an_order")
 
 
 def test_reversed():
     v = view.View()
-    v.request(tft(start=1))
-    v.request(tft(start=2))
-    v.request(tft(start=3))
+    v.requestheaders(tft(start=1))
+    v.requestheaders(tft(start=2))
+    v.requestheaders(tft(start=3))
     v.set_reversed(True)
 
-    assert v[0].request.timestamp_start == 3
-    assert v[-1].request.timestamp_start == 1
-    assert v[2].request.timestamp_start == 1
+    assert v[0].timestamp_created == 3
+    assert v[-1].timestamp_created == 1
+    assert v[2].timestamp_created == 1
     with pytest.raises(IndexError):
         v[5]
     with pytest.raises(IndexError):
@@ -384,7 +388,7 @@ def test_update():
     v.set_filter(flt)
 
     f = tft(method="get")
-    v.request(f)
+    v.requestheaders(f)
     assert f in v
 
     f.request.method = "put"
@@ -481,21 +485,21 @@ def test_focus_follow():
 
         v.add([tft(start=4)])
         assert v.focus.index == 0
-        assert v.focus.flow.request.timestamp_start == 4
+        assert v.focus.flow.timestamp_created == 4
 
         v.add([tft(start=7)])
         assert v.focus.index == 2
-        assert v.focus.flow.request.timestamp_start == 7
+        assert v.focus.flow.timestamp_created == 7
 
         mod = tft(method="put", start=6)
         v.add([mod])
         assert v.focus.index == 2
-        assert v.focus.flow.request.timestamp_start == 7
+        assert v.focus.flow.timestamp_created == 7
 
         mod.request.method = "GET"
         v.update([mod])
         assert v.focus.index == 2
-        assert v.focus.flow.request.timestamp_start == 6
+        assert v.focus.flow.timestamp_created == 6
 
 
 def test_focus():
@@ -591,7 +595,7 @@ def test_settings():
 def test_properties():
     v = view.View()
     f = tft()
-    v.request(f)
+    v.requestheaders(f)
     assert v.get_length() == 1
     assert not v.get_marked()
     v.toggle_marked()
@@ -603,7 +607,7 @@ def test_configure():
     v = view.View()
     with taddons.context(v) as tctx:
         tctx.configure(v, view_filter="~q")
-        with pytest.raises(Exception, match="Invalid interception filter"):
+        with pytest.raises(Exception, match="Invalid filter expression"):
             tctx.configure(v, view_filter="~~")
 
         tctx.configure(v, view_order="method")
@@ -614,3 +618,13 @@ def test_configure():
 
         tctx.configure(v, console_focus_follow=True)
         assert v.focus_follow
+
+
+@pytest.mark.parametrize("marker, expected", [
+    [":default:", SYMBOL_MARK],
+    ["X", "X"],
+    [":grapes:", "\N{grapes}"],
+    [":not valid:", SYMBOL_MARK], [":weird", SYMBOL_MARK]
+])
+def test_marker(marker, expected):
+    assert render_marker(marker) == expected

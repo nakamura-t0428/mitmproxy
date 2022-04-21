@@ -1,8 +1,9 @@
+import asyncio
 import time
-import typing  # noqa
+import typing
 import uuid
 
-from mitmproxy import controller, connection
+from mitmproxy import connection
 from mitmproxy import exceptions
 from mitmproxy import stateobject
 from mitmproxy import version
@@ -82,9 +83,18 @@ class Flow(stateobject.StateObject):
     We're waiting for a user action to forward the flow to its destination.
     """
 
-    marked: bool
+    marked: str = ""
     """
-    If `True`, this flow has been marked by the user.
+    If this attribute is a non-empty string the flow has been marked by the user.
+
+    A string value will be used as the marker annotation. May either be a single character or a Unicode emoji name.
+
+    For example `:grapes:` becomes `🍇` in views that support emoji rendering.
+    Consult the [Github API Emoji List](https://api.github.com/emojis) for a list of emoji that may be used.
+    Not all emoji, especially [emoji modifiers](https://en.wikipedia.org/wiki/Miscellaneous_Symbols_and_Pictographs#Emoji_modifiers)
+    will render consistently.
+
+    The default marker for the view will be used if the Unicode emoji name can not be interpreted.
     """
 
     is_replay: typing.Optional[str]
@@ -95,25 +105,40 @@ class Flow(stateobject.StateObject):
      - a value of `response` indicates that the response to the client's request has been set by server replay.
     """
 
+    live: bool
+    """
+    If `True`, the flow belongs to a currently active connection.
+    If `False`, the flow may have been already completed or loaded from disk.
+    """
+
+    timestamp_created: float
+    """
+    The Unix timestamp of when this flow was created.
+
+    In contrast to `timestamp_start`, this value will not change when a flow is replayed.
+    """
+
     def __init__(
         self,
         type: str,
         client_conn: connection.Client,
         server_conn: connection.Server,
-        live: bool = None
+        live: bool = False,
     ) -> None:
         self.type = type
         self.id = str(uuid.uuid4())
         self.client_conn = client_conn
         self.server_conn = server_conn
         self.live = live
+        self.timestamp_created = time.time()
 
         self.intercepted: bool = False
+        self._resume_event: typing.Optional[asyncio.Event] = None
         self._backup: typing.Optional[Flow] = None
-        self.reply: typing.Optional[controller.Reply] = None
-        self.marked: bool = False
+        self.marked: str = ""
         self.is_replay: typing.Optional[str] = None
         self.metadata: typing.Dict[str, typing.Any] = dict()
+        self.comment: str = ""
 
     _stateobject_attributes = dict(
         id=str,
@@ -123,8 +148,10 @@ class Flow(stateobject.StateObject):
         type=str,
         intercepted=bool,
         is_replay=str,
-        marked=bool,
+        marked=str,
         metadata=typing.Dict[str, typing.Any],
+        comment=str,
+        timestamp_created=float,
     )
 
     def get_state(self):
@@ -151,8 +178,6 @@ class Flow(stateobject.StateObject):
         """Make a copy of this flow."""
         f = super().copy()
         f.live = False
-        if self.reply is not None:
-            f.reply = controller.DummyReply()
         return f
 
     def modified(self):
@@ -183,8 +208,7 @@ class Flow(stateobject.StateObject):
     def killable(self):
         """*Read-only:* `True` if this flow can be killed, `False` otherwise."""
         return (
-            self.reply and
-            self.reply.state in {"start", "taken"} and
+            self.live and
             not (self.error and self.error.msg == Error.KILLED_MESSAGE)
         )
 
@@ -194,6 +218,10 @@ class Flow(stateobject.StateObject):
         """
         if not self.killable:
             raise exceptions.ControlException("Flow is not killable.")
+        # TODO: The way we currently signal killing is not ideal. One major problem is that we cannot kill
+        #  flows in transit (https://github.com/mitmproxy/mitmproxy/issues/4711), even though they are advertised
+        #  as killable. An alternative approach would be to introduce a `KillInjected` event similar to
+        #  `MessageInjected`, which should fix this issue.
         self.error = Error(Error.KILLED_MESSAGE)
         self.intercepted = False
         self.live = False
@@ -206,7 +234,18 @@ class Flow(stateobject.StateObject):
         if self.intercepted:
             return
         self.intercepted = True
-        self.reply.take()
+        if self._resume_event is not None:
+            self._resume_event.clear()
+
+    async def wait_for_resume(self):
+        """
+        Wait until this Flow is resumed.
+        """
+        if not self.intercepted:
+            return
+        if self._resume_event is None:
+            self._resume_event = asyncio.Event()
+        await self._resume_event.wait()
 
     def resume(self):
         """
@@ -215,9 +254,8 @@ class Flow(stateobject.StateObject):
         if not self.intercepted:
             return
         self.intercepted = False
-        # If a flow is intercepted and then duplicated, the duplicated one is not taken.
-        if self.reply.state == "taken":
-            self.reply.commit()
+        if self._resume_event is not None:
+            self._resume_event.set()
 
     @property
     def timestamp_start(self) -> float:

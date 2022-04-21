@@ -32,50 +32,37 @@ def test_configure():
 
 def test_simple():
     sio = io.StringIO()
-    sio_err = io.StringIO()
-    d = dumper.Dumper(sio, sio_err)
+    d = dumper.Dumper(sio)
     with taddons.context(d) as ctx:
         ctx.configure(d, flow_detail=0)
         d.response(tflow.tflow(resp=True))
         assert not sio.getvalue()
         sio.truncate(0)
-        assert not sio_err.getvalue()
-        sio_err.truncate(0)
 
         ctx.configure(d, flow_detail=1)
         d.response(tflow.tflow(resp=True))
         assert sio.getvalue()
         sio.truncate(0)
-        assert not sio_err.getvalue()
-        sio_err.truncate(0)
 
         ctx.configure(d, flow_detail=1)
         d.error(tflow.tflow(err=True))
         assert sio.getvalue()
         sio.truncate(0)
-        assert not sio_err.getvalue()
-        sio_err.truncate(0)
 
         ctx.configure(d, flow_detail=4)
         d.response(tflow.tflow(resp=True))
         assert sio.getvalue()
         sio.truncate(0)
-        assert not sio_err.getvalue()
-        sio_err.truncate(0)
 
         ctx.configure(d, flow_detail=4)
         d.response(tflow.tflow(resp=True))
         assert "<<" in sio.getvalue()
         sio.truncate(0)
-        assert not sio_err.getvalue()
-        sio_err.truncate(0)
 
         ctx.configure(d, flow_detail=4)
         d.response(tflow.tflow(err=True))
         assert "<<" in sio.getvalue()
         sio.truncate(0)
-        assert not sio_err.getvalue()
-        sio_err.truncate(0)
 
         ctx.configure(d, flow_detail=4)
         flow = tflow.tflow()
@@ -88,8 +75,6 @@ def test_simple():
         d.response(flow)
         assert sio.getvalue()
         sio.truncate(0)
-        assert not sio_err.getvalue()
-        sio_err.truncate(0)
 
         ctx.configure(d, flow_detail=4)
         flow = tflow.tflow(resp=tutils.tresp(content=b"{"))
@@ -98,8 +83,6 @@ def test_simple():
         d.response(flow)
         assert sio.getvalue()
         sio.truncate(0)
-        assert not sio_err.getvalue()
-        sio_err.truncate(0)
 
         ctx.configure(d, flow_detail=4)
         flow = tflow.tflow()
@@ -108,18 +91,15 @@ def test_simple():
         d.response(flow)
         assert "content missing" in sio.getvalue()
         sio.truncate(0)
-        assert not sio_err.getvalue()
-        sio_err.truncate(0)
 
 
 def test_echo_body():
-    f = tflow.tflow(client_conn=True, server_conn=True, resp=True)
+    f = tflow.tflow(resp=True)
     f.response.headers["content-type"] = "text/html"
     f.response.content = b"foo bar voing\n" * 100
 
     sio = io.StringIO()
-    sio_err = io.StringIO()
-    d = dumper.Dumper(sio, sio_err)
+    d = dumper.Dumper(sio)
     with taddons.context(d) as ctx:
         ctx.configure(d, flow_detail=3)
         d._echo_message(f.response, f)
@@ -129,11 +109,10 @@ def test_echo_body():
 
 def test_echo_trailer():
     sio = io.StringIO()
-    sio_err = io.StringIO()
-    d = dumper.Dumper(sio, sio_err)
+    d = dumper.Dumper(sio)
     with taddons.context(d) as ctx:
         ctx.configure(d, flow_detail=3)
-        f = tflow.tflow(client_conn=True, server_conn=True, resp=True)
+        f = tflow.tflow(resp=True)
 
         f.request.headers["content-type"] = "text/html"
         f.request.headers["transfer-encoding"] = "chunked"
@@ -158,30 +137,29 @@ def test_echo_trailer():
 
 def test_echo_request_line():
     sio = io.StringIO()
-    sio_err = io.StringIO()
-    d = dumper.Dumper(sio, sio_err)
+    d = dumper.Dumper(sio)
     with taddons.context(d) as ctx:
         ctx.configure(d, flow_detail=3, showhost=True)
-        f = tflow.tflow(client_conn=None, server_conn=True, resp=True)
+        f = tflow.tflow(resp=True)
         f.is_replay = "request"
         d._echo_request_line(f)
         assert "[replay]" in sio.getvalue()
         sio.truncate(0)
 
-        f = tflow.tflow(client_conn=None, server_conn=True, resp=True)
+        f = tflow.tflow(resp=True)
         f.is_replay = None
         d._echo_request_line(f)
         assert "[replay]" not in sio.getvalue()
         sio.truncate(0)
 
-        f = tflow.tflow(client_conn=None, server_conn=True, resp=True)
+        f = tflow.tflow(resp=True)
         f.request.http_version = "nonstandard"
         d._echo_request_line(f)
         assert "nonstandard" in sio.getvalue()
         sio.truncate(0)
 
-        ctx.configure(d, flow_detail=0, showhost=True)
-        f = tflow.tflow(client_conn=None, server_conn=True, resp=True)
+        ctx.configure(d, flow_detail=1, showhost=True)
+        f = tflow.tflow(resp=True)
         terminalWidth = max(shutil.get_terminal_size()[0] - 25, 50)
         f.request.url = "http://address:22/" + ("x" * terminalWidth) + "textToBeTruncated"
         d._echo_request_line(f)
@@ -189,24 +167,20 @@ def test_echo_request_line():
         sio.truncate(0)
 
 
-class TestContentView:
-    @pytest.mark.asyncio
-    async def test_contentview(self):
-        with mock.patch("mitmproxy.contentviews.auto.ViewAuto.__call__") as va:
-            va.side_effect = ValueError("")
-            sio = io.StringIO()
-            sio_err = io.StringIO()
-            d = dumper.Dumper(sio, sio_err)
-            with taddons.context(d) as tctx:
-                tctx.configure(d, flow_detail=4)
-                d.response(tflow.tflow())
-                await tctx.master.await_log("content viewer failed")
+async def test_contentview():
+    with mock.patch("mitmproxy.contentviews.auto.ViewAuto.__call__") as va:
+        va.side_effect = ValueError("")
+        sio = io.StringIO()
+        d = dumper.Dumper(sio)
+        with taddons.context(d) as tctx:
+            tctx.configure(d, flow_detail=4)
+            d.response(tflow.tflow())
+            await tctx.master.await_log("content viewer failed")
 
 
 def test_tcp():
     sio = io.StringIO()
-    sio_err = io.StringIO()
-    d = dumper.Dumper(sio, sio_err)
+    d = dumper.Dumper(sio)
     with taddons.context(d) as ctx:
         ctx.configure(d, flow_detail=3, showhost=True)
         f = tflow.ttcpflow()
@@ -216,13 +190,12 @@ def test_tcp():
 
         f = tflow.ttcpflow(client_conn=True, err=True)
         d.tcp_error(f)
-        assert "Error in TCP" in sio_err.getvalue()
+        assert "Error in TCP" in sio.getvalue()
 
 
 def test_websocket():
     sio = io.StringIO()
-    sio_err = io.StringIO()
-    d = dumper.Dumper(sio, sio_err)
+    d = dumper.Dumper(sio)
     with taddons.context(d) as ctx:
         ctx.configure(d, flow_detail=3, showhost=True)
         f = tflow.twebsocketflow()
@@ -232,18 +205,47 @@ def test_websocket():
 
         d.websocket_end(f)
         assert "WebSocket connection closed by" in sio.getvalue()
+        sio.truncate(0)
 
         f = tflow.twebsocketflow(err=True)
-        d.websocket_error(f)
-        assert "Error in WebSocket" in sio_err.getvalue()
+        d.websocket_end(f)
+        assert "Error in WebSocket" in sio.getvalue()
+        assert "(reason:" not in sio.getvalue()
+        sio.truncate(0)
+
+        f = tflow.twebsocketflow(err=True, close_reason='Some lame excuse')
+        d.websocket_end(f)
+        assert "Error in WebSocket" in sio.getvalue()
+        assert "(reason: Some lame excuse)" in sio.getvalue()
+        sio.truncate(0)
+
+        f = tflow.twebsocketflow(close_code=4000)
+        d.websocket_end(f)
+        assert "UNKNOWN_ERROR=4000" in sio.getvalue()
+        assert "(reason:" not in sio.getvalue()
+        sio.truncate(0)
+
+        f = tflow.twebsocketflow(close_code=4000, close_reason='I swear I had a reason')
+        d.websocket_end(f)
+        assert "UNKNOWN_ERROR=4000" in sio.getvalue()
+        assert "(reason: I swear I had a reason)" in sio.getvalue()
 
 
 def test_http2():
     sio = io.StringIO()
-    sio_err = io.StringIO()
-    d = dumper.Dumper(sio, sio_err)
+    d = dumper.Dumper(sio)
     with taddons.context(d):
         f = tflow.tflow(resp=True)
         f.response.http_version = b"HTTP/2.0"
         d.response(f)
         assert "HTTP/2.0 200 OK" in sio.getvalue()
+
+
+def test_styling():
+    sio = io.StringIO()
+
+    d = dumper.Dumper(sio)
+    d.out_has_vt_codes = True
+    with taddons.context(d):
+        d.response(tflow.tflow(resp=True))
+        assert "\x1b[" in sio.getvalue()

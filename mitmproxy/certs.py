@@ -2,6 +2,7 @@ import contextlib
 import datetime
 import ipaddress
 import os
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,7 +18,7 @@ import OpenSSL
 from mitmproxy.coretypes import serializable
 
 # Default expiry must not be too long: https://github.com/mitmproxy/mitmproxy/issues/815
-CA_EXPIRY = datetime.timedelta(days=3 * 365)
+CA_EXPIRY = datetime.timedelta(days=10 * 365)
 CERT_EXPIRY = datetime.timedelta(days=365)
 
 # Generated with "openssl dhparam". It's too slow to generate this on startup.
@@ -48,6 +49,12 @@ class Cert(serializable.Serializable):
 
     def __eq__(self, other):
         return self.fingerprint() == other.fingerprint()
+
+    def __repr__(self):
+        return f"<Cert(cn={self.cn!r}, altnames={self.altnames!r})>"
+
+    def __hash__(self):
+        return self._cert.__hash__()
 
     @classmethod
     def from_state(cls, state):
@@ -83,11 +90,13 @@ class Cert(serializable.Serializable):
 
     @property
     def notbefore(self) -> datetime.datetime:
-        return self._cert.not_valid_before
+        # x509.Certificate.not_valid_before is a naive datetime in UTC
+        return self._cert.not_valid_before.replace(tzinfo=datetime.timezone.utc)
 
     @property
     def notafter(self) -> datetime.datetime:
-        return self._cert.not_valid_after
+        # x509.Certificate.not_valid_after is a naive datetime in UTC
+        return self._cert.not_valid_after.replace(tzinfo=datetime.timezone.utc)
 
     def has_expired(self) -> bool:
         return datetime.datetime.utcnow() > self._cert.not_valid_after
@@ -145,8 +154,13 @@ class Cert(serializable.Serializable):
 
 def _name_to_keyval(name: x509.Name) -> List[Tuple[str, str]]:
     parts = []
-    for rdn in name.rdns:
-        k, v = rdn.rfc4514_string().split("=", maxsplit=1)
+    for attr in name:
+        # pyca cryptography <35.0.0 backwards compatiblity
+        if hasattr(name, "rfc4514_attribute_name"):  # pragma: no cover
+            k = attr.rfc4514_attribute_name  # type: ignore
+        else:  # pragma: no cover
+            k = attr.rfc4514_string().partition("=")[0]
+        v = attr.value
         parts.append((k, v))
     return parts
 
@@ -297,16 +311,16 @@ class CertStore:
 
         # we could use cryptography for this, but it's unclear how to convert cryptography's object to pyOpenSSL's
         # expected format.
-        bio = OpenSSL.SSL._lib.BIO_new_file(str(path).encode(sys.getfilesystemencoding()), b"r")
-        if bio != OpenSSL.SSL._ffi.NULL:
-            bio = OpenSSL.SSL._ffi.gc(bio, OpenSSL.SSL._lib.BIO_free)
-            dh = OpenSSL.SSL._lib.PEM_read_bio_DHparams(
+        bio = OpenSSL.SSL._lib.BIO_new_file(str(path).encode(sys.getfilesystemencoding()), b"r")  # type: ignore
+        if bio != OpenSSL.SSL._ffi.NULL:  # type: ignore
+            bio = OpenSSL.SSL._ffi.gc(bio, OpenSSL.SSL._lib.BIO_free)  # type: ignore
+            dh = OpenSSL.SSL._lib.PEM_read_bio_DHparams(  # type: ignore
                 bio,
-                OpenSSL.SSL._ffi.NULL,
-                OpenSSL.SSL._ffi.NULL,
-                OpenSSL.SSL._ffi.NULL
+                OpenSSL.SSL._ffi.NULL,  # type: ignore
+                OpenSSL.SSL._ffi.NULL,  # type: ignore
+                OpenSSL.SSL._ffi.NULL  # type: ignore
             )
-            dh = OpenSSL.SSL._ffi.gc(dh, OpenSSL.SSL._lib.DH_free)
+            dh = OpenSSL.SSL._ffi.gc(dh, OpenSSL.SSL._lib.DH_free)  # type: ignore
             return dh
         raise RuntimeError("Error loading DH Params.")  # pragma: no cover
 
@@ -329,9 +343,10 @@ class CertStore:
     def from_files(cls, ca_file: Path, dhparam_file: Path, passphrase: Optional[bytes] = None) -> "CertStore":
         raw = ca_file.read_bytes()
         key = load_pem_private_key(raw, passphrase)
-        ca = Cert.from_pem(raw)
         dh = cls.load_dhparam(dhparam_file)
-        if raw.count(b"BEGIN CERTIFICATE") != 1:
+        certs = re.split(rb"(?=-----BEGIN CERTIFICATE-----)", raw)
+        ca = Cert.from_pem(certs[1])
+        if len(certs) > 2:
             chain_file: Optional[Path] = ca_file
         else:
             chain_file = None

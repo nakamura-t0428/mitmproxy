@@ -4,14 +4,16 @@ from pathlib import Path
 from typing import List, Optional, TypedDict, Any
 
 from OpenSSL import SSL
-from mitmproxy import certs, ctx, exceptions, connection
+from mitmproxy import certs, ctx, exceptions, connection, tls
 from mitmproxy.net import tls as net_tls
 from mitmproxy.options import CONF_BASENAME
 from mitmproxy.proxy import context
-from mitmproxy.proxy.layers import tls
+from mitmproxy.proxy.layers import modes
+from mitmproxy.proxy.layers import tls as proxy_tls
 
 # We manually need to specify this, otherwise OpenSSL may select a non-HTTP2 cipher by default.
 # https://ssl-config.mozilla.org/#config=old
+
 DEFAULT_CIPHERS = (
     'ECDHE-ECDSA-AES128-GCM-SHA256', 'ECDHE-RSA-AES128-GCM-SHA256', 'ECDHE-ECDSA-AES256-GCM-SHA384',
     'ECDHE-RSA-AES256-GCM-SHA384', 'ECDHE-ECDSA-CHACHA20-POLY1305', 'ECDHE-RSA-CHACHA20-POLY1305',
@@ -24,21 +26,28 @@ DEFAULT_CIPHERS = (
 
 
 class AppData(TypedDict):
+    client_alpn: Optional[bytes]
     server_alpn: Optional[bytes]
     http2: bool
 
 
 def alpn_select_callback(conn: SSL.Connection, options: List[bytes]) -> Any:
     app_data: AppData = conn.get_app_data()
+    client_alpn = app_data["client_alpn"]
     server_alpn = app_data["server_alpn"]
     http2 = app_data["http2"]
+    if client_alpn is not None:
+        if client_alpn in options:
+            return client_alpn
+        else:
+            return SSL.NO_OVERLAPPING_PROTOCOLS
     if server_alpn and server_alpn in options:
         return server_alpn
     if server_alpn == b"":
         # We do have a server connection, but the remote server refused to negotiate a protocol:
         # We need to mirror this on the client connection.
         return SSL.NO_OVERLAPPING_PROTOCOLS
-    http_alpns = tls.HTTP_ALPNS if http2 else tls.HTTP1_ALPNS
+    http_alpns = proxy_tls.HTTP_ALPNS if http2 else proxy_tls.HTTP1_ALPNS
     for alpn in options:  # client sends in order of preference, so we are nice and respect that.
         if alpn in http_alpns:
             return alpn
@@ -98,27 +107,20 @@ class TlsConfig:
 
     def tls_clienthello(self, tls_clienthello: tls.ClientHelloData):
         conn_context = tls_clienthello.context
-        only_non_http_alpns = (
-                conn_context.client.alpn_offers and
-                all(x not in tls.HTTP_ALPNS for x in conn_context.client.alpn_offers)
-        )
         tls_clienthello.establish_server_tls_first = conn_context.server.tls and (
                 ctx.options.connection_strategy == "eager" or
                 ctx.options.add_upstream_certs_to_client_chain or
-                ctx.options.upstream_cert and (
-                        only_non_http_alpns or
-                        not conn_context.client.sni
-                )
+                ctx.options.upstream_cert
         )
 
-    def tls_start(self, tls_start: tls.TlsStartData):
-        if tls_start.conn == tls_start.context.client:
-            self.create_client_proxy_ssl_conn(tls_start)
-        else:
-            self.create_proxy_server_ssl_conn(tls_start)
+    def tls_start_client(self, tls_start: tls.TlsData) -> None:
+        """Establish TLS between client and proxy."""
+        if tls_start.ssl_conn is not None:
+            return  # a user addon has already provided the pyOpenSSL context.
 
-    def create_client_proxy_ssl_conn(self, tls_start: tls.TlsStartData) -> None:
-        client: connection.Client = tls_start.context.client
+        assert isinstance(tls_start.conn, connection.Client)
+
+        client: connection.Client = tls_start.conn
         server: connection.Server = tls_start.context.server
 
         entry = self.get_cert(tls_start.context)
@@ -137,25 +139,42 @@ class TlsConfig:
         ssl_ctx = net_tls.create_client_proxy_context(
             min_version=net_tls.Version[ctx.options.tls_version_client_min],
             max_version=net_tls.Version[ctx.options.tls_version_client_max],
-            cipher_list=cipher_list,
+            cipher_list=tuple(cipher_list),
             cert=entry.cert,
             key=entry.privatekey,
             chain_file=entry.chain_file,
             request_client_cert=False,
             alpn_select_callback=alpn_select_callback,
-            extra_chain_certs=extra_chain_certs,
+            extra_chain_certs=tuple(extra_chain_certs),
             dhparams=self.certstore.dhparams,
         )
         tls_start.ssl_conn = SSL.Connection(ssl_ctx)
+
+        # Force HTTP/1 for secure web proxies, we currently don't support CONNECT over HTTP/2.
+        # There is a proof-of-concept branch at https://github.com/mhils/mitmproxy/tree/http2-proxy,
+        # but the complexity outweighs the benefits for now.
+        if len(tls_start.context.layers) == 2 and isinstance(tls_start.context.layers[0], modes.HttpProxy):
+            client_alpn: Optional[bytes] = b"http/1.1"
+        else:
+            client_alpn = client.alpn
+
         tls_start.ssl_conn.set_app_data(AppData(
+            client_alpn=client_alpn,
             server_alpn=server.alpn,
             http2=ctx.options.http2,
         ))
         tls_start.ssl_conn.set_accept_state()
 
-    def create_proxy_server_ssl_conn(self, tls_start: tls.TlsStartData) -> None:
+    def tls_start_server(self, tls_start: tls.TlsData) -> None:
+        """Establish TLS between proxy and server."""
+        if tls_start.ssl_conn is not None:
+            return  # a user addon has already provided the pyOpenSSL context.
+
+        assert isinstance(tls_start.conn, connection.Server)
+
         client: connection.Client = tls_start.context.client
-        server: connection.Server = tls_start.context.server
+        # tls_start.conn may be different from tls_start.context.server, e.g. an upstream HTTPS proxy.
+        server: connection.Server = tls_start.conn
         assert server.address
 
         if ctx.options.ssl_insecure:
@@ -163,24 +182,25 @@ class TlsConfig:
         else:
             verify = net_tls.Verify.VERIFY_PEER
 
-        if server.sni is True:
+        if server.sni is None:
             server.sni = client.sni or server.address[0]
 
         if not server.alpn_offers:
             if client.alpn_offers:
                 if ctx.options.http2:
+                    # We would perfectly support HTTP/1 -> HTTP/2, but we want to keep things on the same protocol
+                    # version. There are some edge cases where we want to mirror the regular server's behavior
+                    # accurately, for example header capitalization.
                     server.alpn_offers = tuple(client.alpn_offers)
                 else:
                     server.alpn_offers = tuple(x for x in client.alpn_offers if x != b"h2")
-            elif client.tls_established:
-                # We would perfectly support HTTP/1 -> HTTP/2, but we want to keep things on the same protocol version.
-                # There are some edge cases where we want to mirror the regular server's behavior accurately,
-                # for example header capitalization.
-                server.alpn_offers = []
-            elif ctx.options.http2:
-                server.alpn_offers = tls.HTTP_ALPNS
             else:
-                server.alpn_offers = tls.HTTP1_ALPNS
+                # We either have no client TLS or a client without ALPN.
+                # - If the client does use TLS but did not send an ALPN extension, we want to mirror that upstream.
+                # - If the client does not use TLS, there's no clear-cut answer. As a pragmatic approach, we also do
+                #   not send any ALPN extension in this case, which defaults to whatever protocol we are speaking
+                #   or falls back to HTTP.
+                server.alpn_offers = []
 
         if not server.cipher_list and ctx.options.ciphers_server:
             server.cipher_list = ctx.options.ciphers_server.split(":")
@@ -201,13 +221,13 @@ class TlsConfig:
         ssl_ctx = net_tls.create_proxy_server_context(
             min_version=net_tls.Version[ctx.options.tls_version_client_min],
             max_version=net_tls.Version[ctx.options.tls_version_client_max],
-            cipher_list=cipher_list,
+            cipher_list=tuple(cipher_list),
             verify=verify,
             hostname=server.sni,
             ca_path=ctx.options.ssl_verify_upstream_trusted_confdir,
             ca_pemfile=ctx.options.ssl_verify_upstream_trusted_ca,
             client_cert=client_cert,
-            alpn_protos=server.alpn_offers,
+            alpn_protos=tuple(server.alpn_offers),
         )
 
         tls_start.ssl_conn = SSL.Connection(ssl_ctx)
@@ -273,7 +293,7 @@ class TlsConfig:
         organization: Optional[str] = None
 
         # Use upstream certificate if available.
-        if conn_context.server.certificate_list:
+        if ctx.options.upstream_cert and conn_context.server.certificate_list:
             upstream_cert = conn_context.server.certificate_list[0]
             if upstream_cert.cn:
                 altnames.append(upstream_cert.cn)
@@ -287,9 +307,10 @@ class TlsConfig:
         elif conn_context.server.address:
             altnames.append(conn_context.server.address[0])
 
-        # As a last resort, add *something* so that we have a certificate to serve.
+        # As a last resort, add our local IP address. This may be necessary for HTTPS Proxies which are addressed
+        # via IP. Here we neither have an upstream cert, nor can an IP be included in the server name indication.
         if not altnames:
-            altnames.append("mitmproxy")
+            altnames.append(conn_context.client.sockname[0])
 
         # only keep first occurrence of each hostname
         altnames = list(dict.fromkeys(altnames))

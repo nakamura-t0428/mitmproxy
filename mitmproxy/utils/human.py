@@ -1,33 +1,37 @@
 import datetime
+import functools
 import ipaddress
 import time
-import functools
 import typing
 
-SIZE_TABLE = [
-    ("b", 1024 ** 0),
-    ("k", 1024 ** 1),
-    ("m", 1024 ** 2),
-    ("g", 1024 ** 3),
-    ("t", 1024 ** 4),
-]
 
-SIZE_UNITS = dict(SIZE_TABLE)
-
-
-def pretty_size(size):
-    for bottom, top in zip(SIZE_TABLE, SIZE_TABLE[1:]):
-        if bottom[1] <= size < top[1]:
-            suf = bottom[0]
-            lim = bottom[1]
-            x = round(size / lim, 2)
-            if x == int(x):
-                x = int(x)
-            return str(x) + suf
-    return "{}{}".format(size, SIZE_TABLE[0][0])
+SIZE_UNITS = {
+    "b": 1024 ** 0,
+    "k": 1024 ** 1,
+    "m": 1024 ** 2,
+    "g": 1024 ** 3,
+    "t": 1024 ** 4,
+}
 
 
-@functools.lru_cache()
+def pretty_size(size: int) -> str:
+    """Convert a number of bytes into a human-readable string.
+
+    len(return value) <= 5 always holds true.
+    """
+    s: float = size  # type cast for mypy
+    if s < 1024:
+        return f"{s}b"
+    for suffix in ["k", "m", "g", "t"]:
+        s /= 1024
+        if s < 99.95:
+            return f"{s:.1f}{suffix}"
+        if s < 1024 or suffix == "t":
+            return f"{s:.0f}{suffix}"
+    raise AssertionError
+
+
+@functools.lru_cache
 def parse_size(s: typing.Optional[str]) -> typing.Optional[int]:
     """
     Parse a size with an optional k/m/... suffix.
@@ -61,7 +65,7 @@ def pretty_duration(secs: typing.Optional[float]) -> str:
         if secs >= limit:
             return formatter.format(secs)
     # less than 1 sec
-    return "{:.0f}ms".format(secs * 1000)
+    return f"{secs * 1000:.0f}ms"
 
 
 def format_timestamp(s):
@@ -75,7 +79,7 @@ def format_timestamp_with_milli(s):
     return d.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
 
-@functools.lru_cache()
+@functools.lru_cache
 def format_address(address: typing.Optional[tuple]) -> str:
     """
     This function accepts IPv4/IPv6 tuples and
@@ -86,12 +90,12 @@ def format_address(address: typing.Optional[tuple]) -> str:
     try:
         host = ipaddress.ip_address(address[0])
         if host.is_unspecified:
-            return "*:{}".format(address[1])
+            return f"*:{address[1]}"
         if isinstance(host, ipaddress.IPv4Address):
-            return "{}:{}".format(str(host), address[1])
+            return f"{str(host)}:{address[1]}"
         # If IPv6 is mapped to IPv4
         elif host.ipv4_mapped:
-            return "{}:{}".format(str(host.ipv4_mapped), address[1])
-        return "[{}]:{}".format(str(host), address[1])
+            return f"{str(host.ipv4_mapped)}:{address[1]}"
+        return f"[{str(host)}]:{address[1]}"
     except ValueError:
-        return "{}:{}".format(address[0], address[1])
+        return f"{address[0]}:{address[1]}"

@@ -260,7 +260,9 @@ class Screen(BaseScreen, RealTerminal):
             )
 
             ok = win32.SetConsoleMode(hOut, dwOutMode)
-            assert ok
+            if not ok:
+                raise RuntimeError("Error enabling virtual terminal processing, "
+                                   "mitmproxy's console interface requires Windows 10 Build 10586 or above.")
             ok = win32.SetConsoleMode(hIn, dwInMode)
             assert ok
         else:
@@ -444,7 +446,10 @@ class Screen(BaseScreen, RealTerminal):
             self._input_thread = None
 
         for handle in self._current_event_loop_handles:
-            event_loop.remove_watch_file(handle)
+            try:
+                event_loop.remove_watch_file(handle)
+            except KeyError:
+                pass
 
         if self._input_timeout:
             event_loop.remove_alarm(self._input_timeout)
@@ -1163,7 +1168,7 @@ class ReadInputThread(threading.Thread):
                 if inp.EventType == win32.EventType.KEY_EVENT:
                     if not inp.Event.KeyEvent.bKeyDown:
                         continue
-                    self._input.send(inp.Event.KeyEvent.uChar.AsciiChar)
+                    self._input.send(inp.Event.KeyEvent.uChar.UnicodeChar.encode("utf8"))
                 elif inp.EventType == win32.EventType.WINDOW_BUFFER_SIZE_EVENT:
                     self._resize()
                 else:

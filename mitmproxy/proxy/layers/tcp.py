@@ -70,7 +70,7 @@ class TCPLayer(layer.Layer):
         if self.flow:
             yield TcpStartHook(self.flow)
 
-        if not self.context.server.connected:
+        if self.context.server.timestamp_start is None:
             err = yield commands.OpenConnection(self.context.server)
             if err:
                 if self.flow:
@@ -125,6 +125,7 @@ class TCPLayer(layer.Layer):
                 self._handle_event = self.done
                 if self.flow:
                     yield TcpEndHook(self.flow)
+                    self.flow.live = False
             else:
                 yield commands.CloseConnection(send_to, half_close=True)
         else:

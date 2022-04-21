@@ -10,7 +10,6 @@ from mitmproxy import exceptions
 from mitmproxy import flow
 from mitmproxy import http
 from mitmproxy import io
-from mitmproxy.addons.proxyserver import AsyncReply
 from mitmproxy.hooks import UpdateHook
 from mitmproxy.net import server_spec
 from mitmproxy.options import Options
@@ -74,11 +73,14 @@ class ReplayHandler(server.ConnectionHandler):
         )
         context.server.tls = flow.request.scheme == "https"
         if options.mode.startswith("upstream:"):
-            context.server.via = server_spec.parse_with_mode(options.mode)[1]
+            context.server.via = flow.server_conn.via = server_spec.parse_with_mode(options.mode)[1]
 
         super().__init__(context)
 
-        self.layer = layers.HttpLayer(context, HTTPMode.transparent)
+        if options.mode.startswith("upstream:"):
+            self.layer = layers.HttpLayer(context, HTTPMode.upstream)
+        else:
+            self.layer = layers.HttpLayer(context, HTTPMode.transparent)
         self.layer.connections[client] = MockServer(flow, context.fork())
         self.flow = flow
         self.done = asyncio.Event()
@@ -92,9 +94,9 @@ class ReplayHandler(server.ConnectionHandler):
 
     async def handle_hook(self, hook: commands.StartHook) -> None:
         data, = hook.args()
-        data.reply = AsyncReply(data)
         await ctx.master.addons.handle_lifecycle(hook)
-        await data.reply.done.wait()
+        if isinstance(data, flow.Flow):
+            await data.wait_for_resume()
         if isinstance(hook, (layers.http.HttpResponseHook, layers.http.HttpErrorHook)):
             if self.transports:
                 # close server connections
@@ -133,7 +135,10 @@ class ClientPlayback:
             self.inflight = await self.queue.get()
             try:
                 h = ReplayHandler(self.inflight, self.options)
-                await h.replay()
+                if ctx.options.client_replay_concurrency == -1:
+                    asyncio_utils.create_task(h.replay(), name="client playback awaiting response")
+                else:
+                    await h.replay()
             except Exception:
                 ctx.log(f"Client replay has crashed!\n{traceback.format_exc()}", "error")
             self.queue.task_done()
@@ -160,6 +165,10 @@ class ClientPlayback:
             "client_replay", typing.Sequence[str], [],
             "Replay client requests from a saved file."
         )
+        loader.add_option(
+            "client_replay_concurrency", int, 1,
+            "Concurrency limit on in-flight client replay requests. Currently the only valid values are 1 and -1 (no limit)."
+        )
 
     def configure(self, updated):
         if "client_replay" in updated and ctx.options.client_replay:
@@ -168,6 +177,10 @@ class ClientPlayback:
             except exceptions.FlowReadException as e:
                 raise exceptions.OptionsError(str(e))
             self.start_replay(flows)
+
+        if "client_replay_concurrency" in updated:
+            if ctx.options.client_replay_concurrency not in [-1, 1]:
+                raise exceptions.OptionsError("Currently the only valid client_replay_concurrency values are -1 and 1.")
 
     @command.command("replay.client.count")
     def count(self) -> int:

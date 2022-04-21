@@ -52,22 +52,24 @@
     </ol>
     {% endcall %}
     {% call entry('macOS', 'apple') %}
+    <h5>Manual Installation</h5>
     <ol>
         <li>Double-click the PEM file to open the <samp>Keychain Access</samp> application.</li>
         <li>Locate the new certificate "mitmproxy" in the list and double-click it.</li>
         <li>Change <samp>Secure Socket Layer (SSL)</samp> to <samp>Always Trust</samp>.</li>
         <li>Close the dialog window and enter your password if prompted.</li>
     </ol>
+    <h5>Automated Installation</h5>
+    <ol>
+        <li><code>sudo security add-trusted-cert -d -p ssl -p basic -k /Library/Keychains/System.keychain mitmproxy-ca-cert.pem</code></li>
+    </ol>
     {% endcall %}
     {% call entry('iOS <small>– please read the instructions!</small>', 'apple') %}
     <h5>iOS 13+</h5>
     <ol>
         <li>Use Safari to download the certificate. Other browsers may not open the proper installation prompt.</li>
-        <li>Install the new Profile and activate it (<samp>Settings -> General</samp> ->
-            <samp>Profile</samp>).
-        </li>
-        <li><span class="text-danger"><strong>Important: </strong> Goto
-            <samp>Settings -> General -> About -> Certificate Trust Settings</samp>.
+        <li>Install the new Profile (<samp>Settings -> General -> VPN & Device Management</samp>).</li>
+        <li><span class="text-danger"><strong>Important:</strong> Go to <samp>Settings -> General -> About -> Certificate Trust Settings</samp>.
             Toggle <samp>mitmproxy</samp> to <samp>ON</samp>.</span></li>
     </ol>
     {% endcall %}

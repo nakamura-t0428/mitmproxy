@@ -1,19 +1,22 @@
 import itertools
 import shutil
 import sys
-from typing import Optional, TextIO, Union
+from typing import IO, Optional, Union
 
-import click
+from wsproto.frame_protocol import CloseReason
 
 from mitmproxy import contentviews
 from mitmproxy import ctx
 from mitmproxy import exceptions
+from mitmproxy import flow
 from mitmproxy import flowfilter
 from mitmproxy import http
+from mitmproxy.contrib import click as miniclick
 from mitmproxy.tcp import TCPFlow, TCPMessage
 from mitmproxy.utils import human
 from mitmproxy.utils import strutils
-from mitmproxy.websocket import WebSocketMessage
+from mitmproxy.utils import vt_codes
+from mitmproxy.websocket import WebSocketData, WebSocketMessage
 
 
 def indent(n: int, text: str) -> str:
@@ -22,26 +25,28 @@ def indent(n: int, text: str) -> str:
     return "\n".join(pad + i for i in l)
 
 
-def colorful(line, styles):
-    yield "    "  # we can already indent here
-    for (style, text) in line:
-        yield click.style(text, **styles.get(style, {}))
+CONTENTVIEW_STYLES = {
+    "highlight": dict(bold=True),
+    "offset": dict(fg="blue"),
+    "header": dict(fg="green", bold=True),
+    "text": dict(fg="green"),
+}
 
 
 class Dumper:
-    def __init__(self, outfile=sys.stdout, errfile=sys.stderr):
+    def __init__(self, outfile: Optional[IO[str]] = None):
         self.filter: Optional[flowfilter.TFilter] = None
-        self.outfp: TextIO = outfile
-        self.errfp: TextIO = errfile
+        self.outfp: IO[str] = outfile or sys.stdout
+        self.out_has_vt_codes = vt_codes.ensure_supported(self.outfp)
 
     def load(self, loader):
         loader.add_option(
             "flow_detail", int, 1,
             """
-            The display detail level for flows in mitmdump: 0 (almost quiet) to 3 (very verbose).
-              0: shortened request URL, response status code, WebSocket and TCP message notifications.
-              1: full request URL with response status code
-              2: 1 + HTTP headers
+            The display detail level for flows in mitmdump: 0 (quiet) to 4 (very verbose).
+              0: no output
+              1: shortened request URL with response status code
+              2: full request URL with response status code and HTTP headers
               3: 2 + truncated response content, content of WebSocket and TCP messages
               4: 3 + nothing is truncated
             """
@@ -59,41 +64,41 @@ class Dumper:
     def configure(self, updated):
         if "dumper_filter" in updated:
             if ctx.options.dumper_filter:
-                self.filter = flowfilter.parse(ctx.options.dumper_filter)
-                if not self.filter:
-                    raise exceptions.OptionsError(
-                        "Invalid filter expression: %s" % ctx.options.dumper_filter
-                    )
+                try:
+                    self.filter = flowfilter.parse(ctx.options.dumper_filter)
+                except ValueError as e:
+                    raise exceptions.OptionsError(str(e)) from e
             else:
                 self.filter = None
+
+    def style(self, text: str, **style) -> str:
+        if style and self.out_has_vt_codes:
+            text = miniclick.style(text, **style)
+        return text
 
     def echo(self, text: str, ident=None, **style):
         if ident:
             text = indent(ident, text)
-        click.secho(text, file=self.outfp, **style)
-        if self.outfp:
-            self.outfp.flush()
-
-    def echo_error(self, text: str, **style):
-        click.secho(text, file=self.errfp, **style)
-        if self.errfp:
-            self.errfp.flush()
+        text = self.style(text, **style)
+        print(text, file=self.outfp)
 
     def _echo_headers(self, headers: http.Headers):
         for k, v in headers.fields:
             ks = strutils.bytes_to_escaped_str(k)
+            ks = self.style(ks, fg='blue')
             vs = strutils.bytes_to_escaped_str(v)
-            out = "{}: {}".format(
-                click.style(ks, fg="blue"),
-                click.style(vs)
-            )
-            self.echo(out, ident=4)
+            self.echo(f"{ks}: {vs}", ident=4)
 
     def _echo_trailers(self, trailers: Optional[http.Headers]):
         if not trailers:
             return
-        self.echo(click.style("--- HTTP Trailers", fg="magenta"), ident=4)
+        self.echo("--- HTTP Trailers", fg="magenta", ident=4)
         self._echo_headers(trailers)
+
+    def _colorful(self, line):
+        yield "    "  # we can already indent here
+        for (style, text) in line:
+            yield self.style(text, **CONTENTVIEW_STYLES.get(style, {}))
 
     def _echo_message(
         self,
@@ -113,15 +118,8 @@ class Dumper:
         else:
             lines_to_echo = lines
 
-        styles = dict(
-            highlight=dict(bold=True),
-            offset=dict(fg="blue"),
-            header=dict(fg="green", bold=True),
-            text=dict(fg="green")
-        )
-
         content = "\r\n".join(
-            "".join(colorful(line, styles)) for line in lines_to_echo
+            "".join(self._colorful(line)) for line in lines_to_echo
         )
         if content:
             self.echo("")
@@ -134,15 +132,16 @@ class Dumper:
             self.echo("")
 
     def _echo_request_line(self, flow: http.HTTPFlow) -> None:
-        if flow.client_conn:
-            client = click.style(
+        if flow.is_replay == "request":
+            client = self.style("[replay]", fg="yellow", bold=True)
+        elif flow.client_conn.peername:
+            client = self.style(
                 strutils.escape_control_characters(
                     human.format_address(flow.client_conn.peername)
                 )
             )
-        elif flow.is_replay == "request":
-            client = click.style("[replay]", fg="yellow", bold=True)
-        else:
+        else:  # pragma: no cover
+            # this should not happen, but we're defensive here.
             client = ""
 
         pushed = ' PUSH_PROMISE' if 'h2-pushed-stream' in flow.metadata else ''
@@ -151,7 +150,7 @@ class Dumper:
             GET="green",
             DELETE="red"
         ).get(method.upper(), "magenta")
-        method = click.style(
+        method = self.style(
             strutils.escape_control_characters(method),
             fg=method_color,
             bold=True
@@ -161,12 +160,12 @@ class Dumper:
         else:
             url = flow.request.url
 
-        if ctx.options.flow_detail <= 1:
+        if ctx.options.flow_detail == 1:
             # We need to truncate before applying styles, so we just focus on the URL.
             terminal_width_limit = max(shutil.get_terminal_size()[0] - 25, 50)
             if len(url) > terminal_width_limit:
                 url = url[:terminal_width_limit] + "…"
-        url = click.style(strutils.escape_control_characters(url), bold=True)
+        url = self.style(strutils.escape_control_characters(url), bold=True)
 
         http_version = ""
         if (
@@ -181,7 +180,7 @@ class Dumper:
     def _echo_response_line(self, flow: http.HTTPFlow) -> None:
         if flow.is_replay == "response":
             replay_str = "[replay]"
-            replay = click.style(replay_str, fg="yellow", bold=True)
+            replay = self.style(replay_str, fg="yellow", bold=True)
         else:
             replay_str = ""
             replay = ""
@@ -195,7 +194,7 @@ class Dumper:
             code_color = "magenta"
         elif 400 <= code_int < 600:
             code_color = "red"
-        code = click.style(
+        code = self.style(
             str(code_int),
             fg=code_color,
             bold=True,
@@ -206,7 +205,7 @@ class Dumper:
             reason = flow.response.reason
         else:
             reason = http.status_codes.RESPONSES.get(flow.response.status_code, "")
-        reason = click.style(
+        reason = self.style(
             strutils.escape_control_characters(reason),
             fg=code_color,
             bold=True
@@ -216,7 +215,7 @@ class Dumper:
             size = "(content missing)"
         else:
             size = human.pretty_size(len(flow.response.raw_content))
-        size = click.style(size, bold=True)
+        size = self.style(size, bold=True)
 
         http_version = ""
         if (
@@ -226,7 +225,7 @@ class Dumper:
             # Hide version for h1 <-> h1 connections.
             http_version = f"{flow.response.http_version} "
 
-        arrows = click.style(" <<", bold=True)
+        arrows = self.style(" <<", bold=True)
         if ctx.options.flow_detail == 1:
             # This aligns the HTTP response code with the HTTP request method:
             # 127.0.0.1:59519: GET http://example.com/
@@ -260,6 +259,8 @@ class Dumper:
             msg = strutils.escape_control_characters(f.error.msg)
             self.echo(f" << {msg}", bold=True, fg="red")
 
+        self.outfp.flush()
+
     def match(self, f):
         if ctx.options.flow_detail == 0:
             return False
@@ -276,12 +277,6 @@ class Dumper:
     def error(self, f):
         if self.match(f):
             self.echo_flow(f)
-
-    def websocket_error(self, f: http.HTTPFlow):
-        self.echo_error(
-            f"Error in WebSocket connection to {human.format_address(f.server_conn.address)}: {f.error}",
-            fg="red"
-        )
 
     def websocket_message(self, f: http.HTTPFlow):
         assert f.websocket is not None  # satisfy type checker
@@ -300,12 +295,28 @@ class Dumper:
     def websocket_end(self, f: http.HTTPFlow):
         assert f.websocket is not None  # satisfy type checker
         if self.match(f):
-            c = 'client' if f.websocket.closed_by_client else 'server'
-            self.echo(f"WebSocket connection closed by {c}: {f.websocket.close_code} {f.websocket.close_reason}")
+            if f.websocket.close_code in {1000, 1001, 1005}:
+                c = 'client' if f.websocket.closed_by_client else 'server'
+                self.echo(f"WebSocket connection closed by {c}: {f.websocket.close_code} {f.websocket.close_reason}")
+            else:
+                error = flow.Error(f"WebSocket Error: {self.format_websocket_error(f.websocket)}")
+                self.echo(
+                    f"Error in WebSocket connection to {human.format_address(f.server_conn.address)}: {error}",
+                    fg="red"
+                )
+
+    def format_websocket_error(self, websocket: WebSocketData) -> str:
+        try:
+            ret = CloseReason(websocket.close_code).name
+        except ValueError:
+            ret = f"UNKNOWN_ERROR={websocket.close_code}"
+        if websocket.close_reason:
+            ret += f" (reason: {websocket.close_reason})"
+        return ret
 
     def tcp_error(self, f):
         if self.match(f):
-            self.echo_error(
+            self.echo(
                 f"Error in TCP connection to {human.format_address(f.server_conn.address)}: {f.error}",
                 fg="red"
             )

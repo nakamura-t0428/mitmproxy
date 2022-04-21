@@ -40,6 +40,21 @@ def test_str():
         assert b.is_valid(tctx.master.commands, str, 1) is False
         assert b.completion(tctx.master.commands, str, "") == []
         assert b.parse(tctx.master.commands, str, "foo") == "foo"
+        assert b.parse(tctx.master.commands, str, r"foo\nbar") == "foo\nbar"
+        assert b.parse(tctx.master.commands, str, r"\N{BELL}") == "🔔"
+        with pytest.raises(mitmproxy.exceptions.TypeError):
+            b.parse(tctx.master.commands, bool, r"\N{UNKNOWN UNICODE SYMBOL!}")
+
+
+def test_bytes():
+    with taddons.context() as tctx:
+        b = mitmproxy.types._BytesType()
+        assert b.is_valid(tctx.master.commands, bytes, b"foo") is True
+        assert b.is_valid(tctx.master.commands, bytes, 1) is False
+        assert b.completion(tctx.master.commands, bytes, "") == []
+        assert b.parse(tctx.master.commands, bytes, "foo") == b"foo"
+        with pytest.raises(mitmproxy.exceptions.TypeError):
+            b.parse(tctx.master.commands, bytes, "incomplete escape sequence\\")
 
 
 def test_unknown():
@@ -124,6 +139,25 @@ def test_cutspec():
         assert len(ret) == len(b.valid_prefixes)
 
 
+def test_marker():
+    with taddons.context() as tctx:
+        b = mitmproxy.types._MarkerType()
+        assert b.parse(tctx.master.commands, mitmproxy.types.Marker, ":red_circle:") == ":red_circle:"
+        assert b.parse(tctx.master.commands, mitmproxy.types.Marker, "true") == ":default:"
+        assert b.parse(tctx.master.commands, mitmproxy.types.Marker, "false") == ""
+
+        with pytest.raises(mitmproxy.exceptions.TypeError):
+            b.parse(tctx.master.commands, mitmproxy.types.Marker, ":bogus:")
+
+        assert b.is_valid(tctx.master.commands, mitmproxy.types.Marker, "true") is True
+        assert b.is_valid(tctx.master.commands, mitmproxy.types.Marker, "false") is True
+        assert b.is_valid(tctx.master.commands, mitmproxy.types.Marker, "bogus") is False
+        assert b.is_valid(tctx.master.commands, mitmproxy.types.Marker, "X") is True
+        assert b.is_valid(tctx.master.commands, mitmproxy.types.Marker, ":red_circle:") is True
+        ret = b.completion(tctx.master.commands, mitmproxy.types.Marker, ":smil")
+        assert len(ret) > 10
+
+
 def test_arg():
     with taddons.context() as tctx:
         b = mitmproxy.types._ArgType()
@@ -149,7 +183,10 @@ class DummyConsole:
     def resolve(self, spec: str) -> typing.Sequence[flow.Flow]:
         if spec == "err":
             raise mitmproxy.exceptions.CommandError()
-        n = int(spec)
+        try:
+            n = int(spec)
+        except ValueError:
+            n = 1
         return [tflow.tflow(resp=True)] * n
 
     @command.command("cut")
@@ -167,6 +204,7 @@ def test_flow():
         b = mitmproxy.types._FlowType()
         assert len(b.completion(tctx.master.commands, flow.Flow, "")) == len(b.valid_prefixes)
         assert b.parse(tctx.master.commands, flow.Flow, "1")
+        assert b.parse(tctx.master.commands, flow.Flow, "has space")
         assert b.is_valid(tctx.master.commands, flow.Flow, tflow.tflow()) is True
         assert b.is_valid(tctx.master.commands, flow.Flow, "xx") is False
         with pytest.raises(mitmproxy.exceptions.TypeError):
@@ -190,6 +228,7 @@ def test_flows():
         assert len(b.parse(tctx.master.commands, typing.Sequence[flow.Flow], "0")) == 0
         assert len(b.parse(tctx.master.commands, typing.Sequence[flow.Flow], "1")) == 1
         assert len(b.parse(tctx.master.commands, typing.Sequence[flow.Flow], "2")) == 2
+        assert len(b.parse(tctx.master.commands, typing.Sequence[flow.Flow], "has space")) == 1
         with pytest.raises(mitmproxy.exceptions.TypeError):
             b.parse(tctx.master.commands, typing.Sequence[flow.Flow], "err")
 

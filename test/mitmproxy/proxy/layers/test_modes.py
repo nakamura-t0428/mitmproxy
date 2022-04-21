@@ -3,6 +3,7 @@ import copy
 import pytest
 
 from mitmproxy import platform
+from mitmproxy.addons.proxyauth import ProxyAuth
 from mitmproxy.connection import Client, Server
 from mitmproxy.proxy.commands import CloseConnection, GetSocket, Log, OpenConnection, SendData
 from mitmproxy.proxy.context import Context
@@ -11,9 +12,9 @@ from mitmproxy.proxy.layer import NextLayer, NextLayerHook
 from mitmproxy.proxy.layers import http, modes, tcp, tls
 from mitmproxy.proxy.layers.http import HTTPMode
 from mitmproxy.proxy.layers.tcp import TcpMessageHook, TcpStartHook
-from mitmproxy.proxy.layers.tls import ClientTLSLayer, TlsStartHook
+from mitmproxy.proxy.layers.tls import ClientTLSLayer, TlsStartClientHook, TlsStartServerHook
 from mitmproxy.tcp import TCPFlow
-from test.mitmproxy.proxy.layers.test_tls import reply_tls_start
+from test.mitmproxy.proxy.layers.test_tls import reply_tls_start_client, reply_tls_start_server
 from test.mitmproxy.proxy.tutils import Placeholder, Playbook, reply, reply_next_layer
 
 
@@ -55,9 +56,7 @@ def test_upstream_https(tctx):
     serverhello = Placeholder(bytes)
     request = Placeholder(bytes)
     tls_finished = Placeholder(bytes)
-    h2_client_settings_ack = Placeholder(bytes)
     response = Placeholder(bytes)
-    h2_server_settings_ack = Placeholder(bytes)
 
     assert (
         proxy1
@@ -66,18 +65,19 @@ def test_upstream_https(tctx):
         >> reply_next_layer(lambda ctx: http.HttpLayer(ctx, HTTPMode.upstream))
         << OpenConnection(upstream)
         >> reply(None)
-        << TlsStartHook(Placeholder())
-        >> reply_tls_start(alpn=b"h2")
+        << TlsStartServerHook(Placeholder())
+        >> reply_tls_start_server(alpn=b"http/1.1")
         << SendData(upstream, clienthello)
     )
     assert upstream().address == ("example.mitmproxy.org", 8081)
+    assert upstream().sni == "example.mitmproxy.org"
     assert (
         proxy2
         >> DataReceived(tctx2.client, clienthello())
         << NextLayerHook(Placeholder(NextLayer))
         >> reply_next_layer(ClientTLSLayer)
-        << TlsStartHook(Placeholder())
-        >> reply_tls_start(alpn=b"h2")
+        << TlsStartClientHook(Placeholder())
+        >> reply_tls_start_client(alpn=b"http/1.1")
         << SendData(tctx2.client, serverhello)
     )
     assert (
@@ -91,21 +91,18 @@ def test_upstream_https(tctx):
         << SendData(tctx2.client, tls_finished)
         << NextLayerHook(Placeholder(NextLayer))
         >> reply_next_layer(lambda ctx: http.HttpLayer(ctx, HTTPMode.regular))
-        << SendData(tctx2.client, h2_client_settings_ack)
         << OpenConnection(server)
         >> reply(None)
-        << SendData(server, b'GET / HTTP/1.1\r\nhost: example.com\r\n\r\n')
+        << SendData(server, b'GET / HTTP/1.1\r\nHost: example.com\r\n\r\n')
         >> DataReceived(server, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
-        << CloseConnection(server)
         << SendData(tctx2.client, response)
     )
     assert server().address == ("example.com", 80)
 
     assert (
         proxy1
-        >> DataReceived(upstream, tls_finished() + h2_client_settings_ack() + response())
-        << SendData(upstream, h2_server_settings_ack)
-        << SendData(tctx1.client, b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n")
+        >> DataReceived(upstream, tls_finished() + response())
+        << SendData(tctx1.client, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
     )
 
 
@@ -200,8 +197,8 @@ def test_reverse_proxy_tcp_over_tls(tctx: Context, monkeypatch, patch, connectio
             )
         assert (
             playbook
-            << TlsStartHook(Placeholder())
-            >> reply_tls_start()
+            << TlsStartServerHook(Placeholder())
+            >> reply_tls_start_server()
             << SendData(tctx.server, data)
         )
         assert tls.parse_client_hello(data()).sni == "localhost"
@@ -321,12 +318,23 @@ def test_socks5_success(address: str, packed: bytes, tctx: Context):
     assert nextlayer().data_client() == b"applicationdata"
 
 
+def _valid_socks_auth(data: modes.Socks5AuthData):
+    data.valid = True
+
+
 def test_socks5_trickle(tctx: Context):
+    ProxyAuth().load(tctx.options)
+    tctx.options.proxyauth = "user:password"
     tctx.options.connection_strategy = "lazy"
     playbook = Playbook(modes.Socks5Proxy(tctx))
-    for x in CLIENT_HELLO:
+    for x in b"\x05\x01\x02":
         playbook >> DataReceived(tctx.client, bytes([x]))
-    playbook << SendData(tctx.client, b"\x05\x00")
+    playbook << SendData(tctx.client, b"\x05\x02")
+    for x in b"\x01\x04user\x08password":
+        playbook >> DataReceived(tctx.client, bytes([x]))
+    playbook << modes.Socks5AuthHook(Placeholder())
+    playbook >> reply(side_effect=_valid_socks_auth)
+    playbook << SendData(tctx.client, b"\x01\x00")
     for x in b"\x05\x01\x00\x01\x7f\x00\x00\x01\x12\x34":
         playbook >> DataReceived(tctx.client, bytes([x]))
     assert playbook << SendData(tctx.client, b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00")
@@ -339,9 +347,6 @@ def test_socks5_trickle(tctx: Context):
     (b"abcd",
      None,
      "Invalid SOCKS version. Expected 0x05, got 0x61"),
-    (b"\x05\x01\x02",
-     b"\x05\xFF\x00\x01\x00\x00\x00\x00\x00\x00",
-     "mitmproxy only supports SOCKS without authentication"),
     (CLIENT_HELLO + b"\x05\x02\x00\x01\x7f\x00\x00\x01\x12\x34",
      SERVER_HELLO + b"\x05\x07\x00\x01\x00\x00\x00\x00\x00\x00",
      r"Unsupported SOCKS5 request: b'\x05\x02\x00\x01\x7f\x00\x00\x01\x124'"),
@@ -356,6 +361,79 @@ def test_socks5_err(data: bytes, err: bytes, msg: str, tctx: Context):
     )
     if err:
         playbook << SendData(tctx.client, err)
+    playbook << CloseConnection(tctx.client)
+    playbook << Log(msg)
+    assert playbook
+
+
+@pytest.mark.parametrize("client_greeting,server_choice,client_auth,server_resp,address,packed", [
+    (b"\x05\x01\x02",
+     b"\x05\x02",
+     b"\x01\x04user\x08password",
+     b"\x01\x00",
+     "127.0.0.1",
+     b"\x01\x7f\x00\x00\x01"),
+    (b"\x05\x02\x01\x02",
+     b"\x05\x02",
+     b"\x01\x04user\x08password",
+     b"\x01\x00",
+     "127.0.0.1",
+     b"\x01\x7f\x00\x00\x01"),
+])
+def test_socks5_auth_success(client_greeting: bytes, server_choice: bytes, client_auth: bytes, server_resp: bytes,
+                             address: bytes, packed: bytes, tctx: Context):
+    ProxyAuth().load(tctx.options)
+    tctx.options.proxyauth = "user:password"
+    server = Placeholder(Server)
+    nextlayer = Placeholder(NextLayer)
+    playbook = (
+        Playbook(modes.Socks5Proxy(tctx), logs=True)
+        >> DataReceived(tctx.client, client_greeting)
+        << SendData(tctx.client, server_choice)
+        >> DataReceived(tctx.client, client_auth)
+        << modes.Socks5AuthHook(Placeholder(modes.Socks5AuthData))
+        >> reply(side_effect=_valid_socks_auth)
+        << SendData(tctx.client, server_resp)
+        >> DataReceived(tctx.client, b"\x05\x01\x00" + packed + b"\x12\x34applicationdata")
+        << OpenConnection(server)
+        >> reply(None)
+        << SendData(tctx.client, b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00")
+        << NextLayerHook(nextlayer)
+    )
+    assert playbook
+    assert server().address == (address, 0x1234)
+    assert nextlayer().data_client() == b"applicationdata"
+
+
+@pytest.mark.parametrize("client_greeting,server_choice,client_auth,err,msg", [
+    (b"\x05\x01\x00",
+     None,
+     None,
+     b"\x05\xFF\x00\x01\x00\x00\x00\x00\x00\x00",
+     "Client does not support SOCKS5 with user/password authentication."),
+    (b"\x05\x02\x00\x02",
+     b"\x05\x02",
+     b"\x01\x04" + b"user" + b"\x07" + b"errcode",
+     b"\x01\x01",
+     "authentication failed"),
+])
+def test_socks5_auth_fail(client_greeting: bytes, server_choice: bytes, client_auth: bytes, err: bytes, msg: str,
+                          tctx: Context):
+    ProxyAuth().load(tctx.options)
+    tctx.options.proxyauth = "user:password"
+    playbook = (
+        Playbook(modes.Socks5Proxy(tctx), logs=True)
+        >> DataReceived(tctx.client, client_greeting)
+    )
+    if server_choice is None:
+        playbook << SendData(tctx.client, err)
+    else:
+        playbook << SendData(tctx.client, server_choice)
+        playbook >> DataReceived(tctx.client, client_auth)
+        playbook << modes.Socks5AuthHook(Placeholder(modes.Socks5AuthData))
+        playbook >> reply()
+        playbook << SendData(tctx.client, err)
+
     playbook << CloseConnection(tctx.client)
     playbook << Log(msg)
     assert playbook

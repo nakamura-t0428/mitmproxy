@@ -72,9 +72,11 @@ class CommandCompleted(Event):
         return super().__new__(cls)
 
     def __init_subclass__(cls, **kwargs):
-        command_cls = cls.__annotations__["command"]
+        command_cls = cls.__annotations__.get("command", None)
         valid_command_subclass = (
-                issubclass(command_cls, commands.Command) and command_cls is not commands.Command
+                isinstance(command_cls, type)
+                and issubclass(command_cls, commands.Command)
+                and command_cls is not commands.Command
         )
         if not valid_command_subclass:
             warnings.warn(f"{command_cls} needs a properly annotated command attribute.", RuntimeWarning)
@@ -84,7 +86,7 @@ class CommandCompleted(Event):
         command_reply_subclasses[command_cls] = cls
 
     def __repr__(self):
-        return f"Reply({repr(self.command)},{repr(self.reply)})"
+        return f"Reply({repr(self.command)}, {repr(self.reply)})"
 
 
 command_reply_subclasses: typing.Dict[commands.Command, typing.Type[CommandCompleted]] = {}

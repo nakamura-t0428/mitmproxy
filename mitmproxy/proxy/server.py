@@ -16,12 +16,11 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 
 from OpenSSL import SSL
-from mitmproxy import http, options as moptions
+from mitmproxy import http, options as moptions, tls
 from mitmproxy.proxy.context import Context
 from mitmproxy.proxy.layers.http import HTTPMode
 from mitmproxy.proxy import commands, events, layer, layers, server_hooks
 from mitmproxy.connection import Address, Client, Connection, ConnectionState
-from mitmproxy.proxy.layers import tls
 from mitmproxy.utils import asyncio_utils
 from mitmproxy.utils import human
 from mitmproxy.utils.data import pkg_data
@@ -89,6 +88,9 @@ class ConnectionHandler(metaclass=abc.ABCMeta):
         self.layer = layer.NextLayer(context, ask_on_start=True)
         self.timeout_watchdog = TimeoutWatchdog(self.on_timeout)
 
+        # workaround for https://bugs.python.org/issue40124 / https://bugs.python.org/issue29930
+        self._drain_lock = asyncio.Lock()
+
     async def handle_client(self) -> None:
         watch = asyncio_utils.create_task(
             self.timeout_watchdog.watch(),
@@ -151,7 +153,7 @@ class ConnectionHandler(metaclass=abc.ABCMeta):
             try:
                 command.connection.timestamp_start = time.time()
                 reader, writer = await asyncio.open_connection(*command.connection.address)
-            except (IOError, asyncio.CancelledError) as e:
+            except (OSError, asyncio.CancelledError) as e:
                 err = str(e)
                 if not err:  # str(CancelledError()) returns empty string.
                     err = "connection cancelled"
@@ -173,18 +175,11 @@ class ConnectionHandler(metaclass=abc.ABCMeta):
 
                 assert command.connection.peername
                 if command.connection.address[0] != command.connection.peername[0]:
-                    addr = f"{command.connection.address[0]} ({human.format_address(command.connection.peername)})"
+                    addr = f"{human.format_address(command.connection.address)} ({human.format_address(command.connection.peername)})"
                 else:
                     addr = human.format_address(command.connection.address)
                 self.log(f"server connect {addr}")
-                connected_hook = asyncio_utils.create_task(
-                    self.handle_hook(server_hooks.ServerConnectedHook(hook_data)),
-                    name=f"handle_hook(server_connected) {addr}",
-                    client=self.client.peername,
-                )
-                if not connected_hook:
-                    return  # this should not be needed, see asyncio_utils.create_task
-
+                await self.handle_hook(server_hooks.ServerConnectedHook(hook_data))
                 self.server_event(events.OpenConnectionCompleted(command, None))
 
                 # during connection opening, this function is the designated handler that can be cancelled.
@@ -202,7 +197,6 @@ class ConnectionHandler(metaclass=abc.ABCMeta):
 
                 self.log(f"server disconnect {addr}")
                 command.connection.timestamp_end = time.time()
-                await connected_hook  # wait here for this so that closed always comes after connected.
                 await self.handle_hook(server_hooks.ServerDisconnectedHook(hook_data))
 
     async def handle_connection(self, connection: Connection) -> None:
@@ -224,8 +218,14 @@ class ConnectionHandler(metaclass=abc.ABCMeta):
             except asyncio.CancelledError as e:
                 cancelled = e
                 break
-            else:
-                self.server_event(events.DataReceived(connection, data))
+
+            self.server_event(events.DataReceived(connection, data))
+
+            try:
+                await self.drain_writers()
+            except asyncio.CancelledError as e:
+                cancelled = e
+                break
 
         if cancelled is None:
             connection.state &= ~ConnectionState.CAN_READ
@@ -250,6 +250,20 @@ class ConnectionHandler(metaclass=abc.ABCMeta):
 
         if cancelled:
             raise cancelled
+
+    async def drain_writers(self):
+        """
+        Drain all writers to create some backpressure. We won't continue reading until there's space available in our
+        write buffers, so if we cannot write fast enough our own read buffers run full and the TCP recv stream is throttled.
+        """
+        async with self._drain_lock:
+            for transport in self.transports.values():
+                if transport.writer is not None:
+                    try:
+                        await transport.writer.drain()
+                    except OSError as e:
+                        if transport.handler is not None:
+                            asyncio_utils.cancel_task(transport.handler, f"Error sending data: {e}")
 
     async def on_timeout(self) -> None:
         self.log(f"Closing connection due to inactivity: {self.client}")
@@ -284,7 +298,7 @@ class ConnectionHandler(metaclass=abc.ABCMeta):
                     )
                     self.transports[command.connection] = ConnectionIO(handler=handler)
                 elif isinstance(command, commands.ConnectionCommand) and command.connection not in self.transports:
-                    return  # The connection has already been closed.
+                    pass  # The connection has already been closed.
                 elif isinstance(command, commands.SendData):
                     writer = self.transports[command.connection].writer
                     assert writer
@@ -411,30 +425,31 @@ if __name__ == "__main__":  # pragma: no cover
             if "redirect" in flow.request.path:
                 flow.request.host = "httpbin.org"
 
-        def tls_start(tls_start: tls.TlsStartData):
+        def tls_start_client(tls_start: tls.TlsData):
             # INSECURE
             ssl_context = SSL.Context(SSL.SSLv23_METHOD)
-            if tls_start.conn == tls_start.context.client:
-                ssl_context.use_privatekey_file(
-                    pkg_data.path("../test/mitmproxy/data/verificationcerts/trusted-leaf.key")
-                )
-                ssl_context.use_certificate_chain_file(
-                    pkg_data.path("../test/mitmproxy/data/verificationcerts/trusted-leaf.crt")
-                )
-
+            ssl_context.use_privatekey_file(
+                pkg_data.path("../test/mitmproxy/data/verificationcerts/trusted-leaf.key")
+            )
+            ssl_context.use_certificate_chain_file(
+                pkg_data.path("../test/mitmproxy/data/verificationcerts/trusted-leaf.crt")
+            )
             tls_start.ssl_conn = SSL.Connection(ssl_context)
+            tls_start.ssl_conn.set_accept_state()
 
-            if tls_start.conn == tls_start.context.client:
-                tls_start.ssl_conn.set_accept_state()
-            else:
-                tls_start.ssl_conn.set_connect_state()
-                if tls_start.context.client.sni is not None:
-                    tls_start.ssl_conn.set_tlsext_host_name(tls_start.context.client.sni.encode())
+        def tls_start_server(tls_start: tls.TlsData):
+            # INSECURE
+            ssl_context = SSL.Context(SSL.SSLv23_METHOD)
+            tls_start.ssl_conn = SSL.Connection(ssl_context)
+            tls_start.ssl_conn.set_connect_state()
+            if tls_start.context.client.sni is not None:
+                tls_start.ssl_conn.set_tlsext_host_name(tls_start.context.client.sni.encode())
 
         await SimpleConnectionHandler(reader, writer, opts, {
             "next_layer": next_layer,
             "request": request,
-            "tls_start": tls_start,
+            "tls_start_client": tls_start_client,
+            "tls_start_server": tls_start_server,
         }).handle_client()
 
     coro = asyncio.start_server(handle, '127.0.0.1', 8080, loop=loop)

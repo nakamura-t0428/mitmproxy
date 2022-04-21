@@ -1,9 +1,12 @@
+import codecs
 import os
 import glob
+import re
 import typing
 
 from mitmproxy import exceptions
 from mitmproxy import flow
+from mitmproxy.utils import emoji, strutils
 
 if typing.TYPE_CHECKING:  # pragma: no cover
     from mitmproxy.command import CommandManager
@@ -34,6 +37,10 @@ class CutSpec(typing.Sequence[str]):
 
 
 class Data(typing.Sequence[typing.Sequence[typing.Union[str, bytes]]]):
+    pass
+
+
+class Marker(str):
     pass
 
 
@@ -99,14 +106,50 @@ class _StrType(_BaseType):
     typ = str
     display = "str"
 
+    # https://docs.python.org/3/reference/lexical_analysis.html#string-and-bytes-literals
+    escape_sequences = re.compile(r"""
+        \\ (
+        [\\'"abfnrtv]  # Standard C escape sequence
+        | [0-7]{1,3}   # Character with octal value
+        | x..          # Character with hex value
+        | N{[^}]+}     # Character name in the Unicode database
+        | u....        # Character with 16-bit hex value
+        | U........    # Character with 32-bit hex value
+        )
+        """, re.VERBOSE)
+
+    @staticmethod
+    def _unescape(match: re.Match) -> str:
+        return codecs.decode(match.group(0), "unicode-escape")  # type: ignore
+
     def completion(self, manager: "CommandManager", t: type, s: str) -> typing.Sequence[str]:
         return []
 
     def parse(self, manager: "CommandManager", t: type, s: str) -> str:
-        return s
+        try:
+            return self.escape_sequences.sub(self._unescape, s)
+        except ValueError as e:
+            raise exceptions.TypeError(f"Invalid str: {e}") from e
 
     def is_valid(self, manager: "CommandManager", typ: typing.Any, val: typing.Any) -> bool:
         return isinstance(val, str)
+
+
+class _BytesType(_BaseType):
+    typ = bytes
+    display = "bytes"
+
+    def completion(self, manager: "CommandManager", t: type, s: str) -> typing.Sequence[str]:
+        return []
+
+    def parse(self, manager: "CommandManager", t: type, s: str) -> bytes:
+        try:
+            return strutils.escaped_str_to_bytes(s)
+        except ValueError as e:
+            raise exceptions.TypeError(str(e))
+
+    def is_valid(self, manager: "CommandManager", typ: typing.Any, val: typing.Any) -> bool:
+        return isinstance(val, bytes)
 
 
 class _UnknownType(_BaseType):
@@ -326,7 +369,7 @@ class _FlowType(_BaseFlowType):
 
     def parse(self, manager: "CommandManager", t: type, s: str) -> flow.Flow:
         try:
-            flows = manager.execute("view.flows.resolve %s" % (s))
+            flows = manager.call_strings("view.flows.resolve", [s])
         except exceptions.CommandError as e:
             raise exceptions.TypeError(str(e)) from e
         if len(flows) != 1:
@@ -345,7 +388,7 @@ class _FlowsType(_BaseFlowType):
 
     def parse(self, manager: "CommandManager", t: type, s: str) -> typing.Sequence[flow.Flow]:
         try:
-            return manager.execute("view.flows.resolve %s" % (s))
+            return manager.call_strings("view.flows.resolve", [s])
         except exceptions.CommandError as e:
             raise exceptions.TypeError(str(e)) from e
 
@@ -406,6 +449,29 @@ class _ChoiceType(_BaseType):
         return val in opts
 
 
+ALL_MARKERS = ['true', 'false'] + list(emoji.emoji)
+
+
+class _MarkerType(_BaseType):
+    typ = Marker
+    display = "marker"
+
+    def completion(self, manager: "CommandManager", t: Choice, s: str) -> typing.Sequence[str]:
+        return ALL_MARKERS
+
+    def parse(self, manager: "CommandManager", t: Choice, s: str) -> str:
+        if s not in ALL_MARKERS:
+            raise exceptions.TypeError("Invalid choice.")
+        if s == 'true':
+            return ":default:"
+        elif s == 'false':
+            return ""
+        return s
+
+    def is_valid(self, manager: "CommandManager", typ: typing.Any, val: str) -> bool:
+        return val in ALL_MARKERS
+
+
 class TypeManager:
     def __init__(self, *types):
         self.typemap = {}
@@ -428,7 +494,9 @@ CommandTypes = TypeManager(
     _FlowType,
     _FlowsType,
     _IntType,
+    _MarkerType,
     _PathType,
     _StrType,
     _StrSeqType,
+    _BytesType,
 )

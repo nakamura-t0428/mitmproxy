@@ -2,7 +2,7 @@ import typing
 
 import os
 
-from mitmproxy.utils import human
+from mitmproxy.utils import emoji
 from mitmproxy import ctx, hooks
 from mitmproxy import exceptions
 from mitmproxy import command
@@ -19,40 +19,12 @@ LISTEN_PORT = 8080
 
 
 class Core:
-    def load(self, loader):
-        loader.add_option(
-            "body_size_limit", typing.Optional[str], None,
-            """
-            Byte size limit of HTTP request and response bodies. Understands
-            k/m/g suffixes, i.e. 3m for 3 megabytes.
-            """
-        )
-        loader.add_option(
-            "keep_host_header", bool, False,
-            """
-            Reverse Proxy: Keep the original host header instead of rewriting it
-            to the reverse proxy target.
-            """
-        )
-
     def configure(self, updated):
         opts = ctx.options
         if opts.add_upstream_certs_to_client_chain and not opts.upstream_cert:
             raise exceptions.OptionsError(
                 "add_upstream_certs_to_client_chain requires the upstream_cert option to be enabled."
             )
-        if "body_size_limit" in updated:
-            if opts.body_size_limit:  # pragma: no cover
-                ctx.log.warn(
-                    "body_size_limit is currently nonfunctioning, "
-                    "see https://github.com/mitmproxy/mitmproxy/issues/4348")
-            try:
-                human.parse_size(opts.body_size_limit)
-            except ValueError:
-                raise exceptions.OptionsError(
-                    "Invalid body size limit specification: %s" %
-                    opts.body_size_limit
-                )
         if "mode" in updated:
             mode = opts.mode
             if mode.startswith("reverse:") or mode.startswith("upstream:"):
@@ -78,16 +50,19 @@ class Core:
                     )
 
     @command.command("set")
-    def set(self, option: str, value: str = "") -> None:
+    def set(self, option: str, *value: str) -> None:
         """
             Set an option. When the value is omitted, booleans are set to true,
             strings and integers are set to None (if permitted), and sequences
             are emptied. Boolean values can be true, false or toggle.
             Multiple values are concatenated with a single space.
         """
-        strspec = f"{option}={value}"
+        if value:
+            specs = [f"{option}={v}" for v in value]
+        else:
+            specs = [option]
         try:
-            ctx.options.set(strspec)
+            ctx.options.set(*specs)
         except exceptions.OptionsError as e:
             raise exceptions.CommandError(e) from e
 
@@ -103,15 +78,17 @@ class Core:
 
     # FIXME: this will become view.mark later
     @command.command("flow.mark")
-    def mark(self, flows: typing.Sequence[flow.Flow], boolean: bool) -> None:
+    def mark(self, flows: typing.Sequence[flow.Flow], marker: mitmproxy.types.Marker) -> None:
         """
             Mark flows.
         """
         updated = []
+        if marker not in emoji.emoji:
+            raise exceptions.CommandError(f"invalid marker value")
+
         for i in flows:
-            if i.marked != boolean:
-                i.marked = boolean
-                updated.append(i)
+            i.marked = marker
+            updated.append(i)
         ctx.master.addons.trigger(hooks.UpdateHook(updated))
 
     # FIXME: this will become view.mark.toggle later
@@ -121,7 +98,10 @@ class Core:
             Toggle mark for flows.
         """
         for i in flows:
-            i.marked = not i.marked
+            if i.marked:
+                i.marked = ""
+            else:
+                i.marked = ":default:"
         ctx.master.addons.trigger(hooks.UpdateHook(flows))
 
     @command.command("flow.kill")
@@ -198,7 +178,7 @@ class Core:
                         req.url = val
                     except ValueError as e:
                         raise exceptions.CommandError(
-                            "URL {} is invalid: {}".format(repr(val), e)
+                            f"URL {repr(val)} is invalid: {e}"
                         ) from e
                 else:
                     self.rupdate = False
@@ -219,7 +199,7 @@ class Core:
                 updated.append(f)
 
         ctx.master.addons.trigger(hooks.UpdateHook(updated))
-        ctx.log.alert("Set {} on  {} flows.".format(attr, len(updated)))
+        ctx.log.alert(f"Set {attr} on  {len(updated)} flows.")
 
     @command.command("flow.decode")
     def decode(self, flows: typing.Sequence[flow.Flow], part: str) -> None:

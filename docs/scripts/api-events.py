@@ -5,10 +5,9 @@ import textwrap
 from pathlib import Path
 from typing import List, Type
 
-import mitmproxy.addons.next_layer  # noqa
 from mitmproxy import hooks, log, addonmanager
 from mitmproxy.proxy import server_hooks, layer
-from mitmproxy.proxy.layers import http, tcp, tls, websocket
+from mitmproxy.proxy.layers import http, modes, tcp, tls, websocket
 
 known = set()
 
@@ -102,6 +101,7 @@ with outfile.open("w") as f, contextlib.redirect_stdout(f):
             http.HttpResponseHook,
             http.HttpErrorHook,
             http.HttpConnectHook,
+            http.HttpConnectUpstreamHook,
         ]
     )
 
@@ -121,7 +121,12 @@ with outfile.open("w") as f, contextlib.redirect_stdout(f):
         "",
         [
             tls.TlsClienthelloHook,
-            tls.TlsStartHook,
+            tls.TlsStartClientHook,
+            tls.TlsStartServerHook,
+            tls.TlsEstablishedClientHook,
+            tls.TlsEstablishedServerHook,
+            tls.TlsFailedClientHook,
+            tls.TlsFailedServerHook,
         ]
     )
 
@@ -132,7 +137,14 @@ with outfile.open("w") as f, contextlib.redirect_stdout(f):
             websocket.WebsocketStartHook,
             websocket.WebsocketMessageHook,
             websocket.WebsocketEndHook,
-            websocket.WebsocketErrorHook,
+        ]
+    )
+
+    category(
+        "SOCKSv5",
+        "",
+        [
+            modes.Socks5AuthHook,
         ]
     )
 
